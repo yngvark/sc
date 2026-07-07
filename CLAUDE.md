@@ -1,0 +1,4 @@
+# sc
+
+- Don't hardcode a specific case (a named env var, path, host, feature flag) into the script when a config- or data-driven mechanism already exists or fits. Extend the existing mechanism (profile `[dirs]` / `[env]` / `[github]` sections, a list, a table) so new cases are added as data, not code. If none exists and more than one case is plausible, prefer introducing a small one over special-casing. Example: mounting `$OBSIDIAN_NOTES_DIR` is done via a profile's `[dirs].rw` + `[env].pass`, not a branch in `sc`.
+- Profile files (`~/.config/sc/profiles/*.toml`) are personal, machine-synced config — you must NOT edit them. When the user asks to change something that belongs in a profile, do NOT write to the profile file. Instead, print the exact, complete file content (the full resulting `<name>.toml`, not just the delta) in a code block so the user can copy-paste it. Read the existing profile first so the printed version merges cleanly with what's already there.
