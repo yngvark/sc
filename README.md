@@ -6,11 +6,20 @@ that adds 1Password-backed GitHub token injection and runs `claude` (or, with
 
 ## Why this exists
 
-Inside the safehouse sandbox, `gh` cannot reach macOS Keychain (Keychain
-access is denied by default). Without a token, `gh pr list` fails. This
-wrapper resolves a GitHub PAT from 1Password outside the sandbox, caches
-it in macOS Keychain with a TTL, then passes only `GITHUB_TOKEN` through
-to the sandboxed process via `safehouse --env-pass=GITHUB_TOKEN`.
+The sandboxed agent should act on GitHub with a deliberately restricted
+credential. This wrapper resolves a GitHub PAT from 1Password outside the
+sandbox, caches it in macOS Keychain with a TTL, then passes only
+`GITHUB_TOKEN` through to the sandboxed process via
+`safehouse --env-pass=GITHUB_TOKEN`.
+
+For that restriction to mean anything, the sandbox must not offer a stronger
+credential as fallback: safehouse's claude agent profile auto-allows macOS
+Keychain IPC (Claude Code may store its own login there), which would let
+`gh` fall back to the keyring OAuth token when `GITHUB_TOKEN` is unset. sc
+therefore appends a policy fragment denying Keychain access, making the
+profile's PAT the only GitHub credential inside the sandbox. `--keychain`
+restores access if a tool genuinely needs it. See
+`docs/keychain-deny.md`.
 
 If you don't need a GitHub token, call `safehouse claude` directly. The
 wrapper is only useful for the `-p` (profile) flag.
@@ -47,6 +56,7 @@ sc -p                         # fzf-pick a profile, persist
 sc -p <name>                  # use the named profile, persist
 sc -P                         # explicitly use no profile (no token, no dirs)
 sc -a                         # mount ~/.aws (rw) and pass AWS_PROFILE
+sc -k                         # allow macOS Keychain access (denied by default)
 sc -y                         # pass the agent's "skip all prompts" flag
 sc --codex                    # run codex instead of claude (mounts ~/.codex rw)
 sc --codex -y                 # codex with --dangerously-bypass-approvals-and-sandbox

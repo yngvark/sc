@@ -223,6 +223,39 @@ def write_ssh_agent_profile() -> str | None:
     return str(path)
 
 
+# safehouse's claude/codex agent profiles auto-inject its keychain integration
+# (55-integrations-optional/keychain.sb) because agents may store their own
+# OAuth creds in the login keychain — but that opens the WHOLE login keychain,
+# notably gh's keyring OAuth token, which defeats the restricted GITHUB_TOKEN
+# the profile injects. These denies are appended after the generated policy so
+# they win over the integration's allows (Seatbelt: last match wins). trustd
+# stays allowed — it does TLS trust evaluation, not credential storage.
+# Claude Code falls back to ~/.claude/.credentials.json. Escape hatch: sc --keychain.
+def keychain_deny_profile_text() -> str:
+    home = str(Path.home())
+    return f'''\
+;; sc: deny macOS Keychain access (see sc --help, --keychain to re-allow).
+(deny mach-lookup
+    (global-name "com.apple.SecurityServer")
+    (global-name "com.apple.securityd.xpc")
+    (global-name "com.apple.secd")
+    (global-name "com.apple.security.agent")
+    (global-name "com.apple.security.authhost"))
+(deny file-read* file-write*
+    (subpath "{home}/Library/Keychains"))
+'''
+
+
+def write_keychain_deny_profile() -> str | None:
+    """Write the keychain-deny fragment for safehouse --append-profile and
+    return its path; None off-darwin. Overwritten on every launch."""
+    if sys.platform != "darwin":
+        return None
+    path = Path(tempfile.gettempdir()) / "sc-deny-keychain.sb"
+    path.write_text(keychain_deny_profile_text())
+    return str(path)
+
+
 def make_temp_dir() -> str:
     """Create a fresh temp dir with `mktemp -d` and return its path."""
     result = subprocess.run(["mktemp", "-d"], capture_output=True, text=True)
@@ -308,6 +341,14 @@ Options:
   -a, --aws            Mount ~/.aws read/write into the sandbox and pass
                        AWS_PROFILE through. Needed for SSO/role caches that
                        AWS CLI writes back to ~/.aws/{sso,cli}/cache.
+  -k, --keychain       Allow macOS Keychain access inside the sandbox. By
+                       default sc denies it (securityd IPC + keychain files),
+                       so login-keychain secrets — e.g. gh's keyring OAuth
+                       token — are unreachable and the profile's GITHUB_TOKEN
+                       is the only GitHub credential. Use this flag if a tool
+                       inside the sandbox genuinely needs the Keychain (e.g.
+                       Claude Code login stored there instead of
+                       ~/.claude/.credentials.json).
   -y                   Pass the agent's "skip all prompts" flag
                        (claude: --dangerously-skip-permissions; see --codex).
   -t, --temp           Create a fresh temp dir (mktemp -d), cd into it, mount
@@ -349,12 +390,13 @@ Profile file (~/.config/sc/profiles/<name>.toml):
 """
 
 
-def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool, bool, bool, bool, bool, list[str], list[str], list[str]]:
-    """Return (select_profile, profile_name, no_profile, aws, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, passthrough)."""
+def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, list[str], list[str], list[str]]:
+    """Return (select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, passthrough)."""
     select_profile = False
     profile_name = ""
     no_profile = False
     aws = False
+    keychain = False
     yes = False
     warm_token = False
     history = False
@@ -391,6 +433,9 @@ def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool
         elif a in ("-a", "--aws"):
             aws = True
             i += 1
+        elif a in ("-k", "--keychain"):
+            keychain = True
+            i += 1
         elif a == "-y":
             yes = True
             i += 1
@@ -423,7 +468,7 @@ def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool
             break
         else:
             fail(f"Error: unknown argument: {a}\nPass arguments to claude after `--` (e.g. `sc -- {a}`).")
-    return select_profile, profile_name, no_profile, aws, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, passthrough
+    return select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, passthrough
 
 
 def resolve_profile(select_profile: bool, profile_name: str, no_profile: bool) -> str | None:
@@ -455,7 +500,7 @@ def resolve_profile(select_profile: bool, profile_name: str, no_profile: bool) -
 
 
 def main() -> None:
-    select_profile, profile_name, no_profile, aws, yes, warm_token, history, temp, codex, repo_root_flag, shell, ro_dirs, rw_dirs, passthrough = parse_args(sys.argv[1:])
+    select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root_flag, shell, ro_dirs, rw_dirs, passthrough = parse_args(sys.argv[1:])
 
     agent_bin, agent_cfg, yolo_flag = agent_spec(codex)
     if shell:
@@ -561,6 +606,13 @@ def main() -> None:
     if ssh_agent_profile:
         safehouse_args.append(f"--append-profile={ssh_agent_profile}")
         err(f"SSH agent: allowing /var/run launchd socket via {ssh_agent_profile}")
+    if keychain:
+        err("Keychain: allowed (--keychain)")
+    else:
+        keychain_profile = write_keychain_deny_profile()
+        if keychain_profile:
+            safehouse_args.append(f"--append-profile={keychain_profile}")
+            err("Keychain: denied (re-allow with --keychain)")
     if ro_dirs:
         safehouse_args.append(f"--add-dirs-ro={':'.join(ro_dirs)}")
     if rw_dirs:

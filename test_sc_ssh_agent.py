@@ -62,7 +62,11 @@ def test_fragment_targets_var_run_launchd_class(sc):
     assert "\\." in frag, "regex dots must be escaped for Seatbelt"
 
 
-def test_write_profile_writes_stable_file_when_needed(sc):
+def test_write_profile_writes_stable_file_when_needed(sc, tmp_dir: str):
+    # Redirect the fragment away from the real temp dir: in a live sc session
+    # safehouse write-protects loaded --append-profile files, so the stable
+    # path is not writable from inside the sandbox.
+    sc.tempfile.gettempdir = lambda: tmp_dir
     real = "/private/var/run/com.apple.launchd.ZZZ/Listeners"
     prev_sock = os.environ.get("SSH_AUTH_SOCK")
     prev_platform = sc.sys.platform
@@ -99,13 +103,13 @@ def test_write_profile_skips_tmp_socket(sc):
 
 
 def main() -> None:
-    with tempfile.TemporaryDirectory() as profile_dir:
+    with tempfile.TemporaryDirectory() as profile_dir, tempfile.TemporaryDirectory() as tmp_dir:
         sc = load_sc(profile_dir)
         test_needs_allow_for_var_run_socket(sc)
         test_no_allow_for_tmp_socket(sc)
         test_no_allow_for_empty(sc)
         test_fragment_targets_var_run_launchd_class(sc)
-        test_write_profile_writes_stable_file_when_needed(sc)
+        test_write_profile_writes_stable_file_when_needed(sc, tmp_dir)
         test_write_profile_skips_tmp_socket(sc)
     print("OK")
 

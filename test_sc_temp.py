@@ -19,8 +19,8 @@ from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 # Indices into the parse_args() return tuple. Keep in sync with sc.
-TEMP_IDX = 7
-CODEX_IDX = 8
+TEMP_IDX = 8
+CODEX_IDX = 9
 
 
 def load_sc(profile_dir: str):
