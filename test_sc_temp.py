@@ -12,8 +12,8 @@ Run directly: ./test_sc_temp.py
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
-import shutil
 import tempfile
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -50,20 +50,72 @@ def test_temp_combines_with_passthrough(sc):
     assert parsed[-1] == ["-c"], parsed  # passthrough is last in the tuple
 
 
-def test_make_temp_dir_creates_real_dir(sc):
-    d = sc.make_temp_dir()
+def test_make_temp_dir_creates_real_dir_under_parent(sc, tmp):
+    orig_parent = sc.TEMP_PARENT
+    sc.TEMP_PARENT = tmp / "temp-parent"  # not pre-created: make_temp_dir must mkdir it
     try:
+        d = sc.make_temp_dir()
         assert Path(d).is_dir(), d
-        # mktemp -d makes a private, empty dir
+        assert Path(d).parent == sc.TEMP_PARENT, d
         assert os.listdir(d) == [], d
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-
-    d2 = sc.make_temp_dir()
-    try:
+        d2 = sc.make_temp_dir()
         assert d2 != d, "each call must create a distinct dir"
     finally:
-        shutil.rmtree(d2, ignore_errors=True)
+        sc.TEMP_PARENT = orig_parent
+
+
+def _trust_state(tmp, name: str, projects: dict) -> Path:
+    state = tmp / name
+    state.write_text(json.dumps({"projects": projects}))
+    return state
+
+
+def test_trusted_exact_dir(sc, tmp):
+    target = tmp / "trust-exact"
+    target.mkdir()
+    state = _trust_state(tmp, "s1.json", {os.path.realpath(str(target)): {"hasTrustDialogAccepted": True}})
+    assert sc.is_claude_trusted(str(target), state_file=state) is True
+
+
+def test_trusted_via_ancestor(sc, tmp):
+    """The design depends on this: trusting the temp parent covers each
+    fresh temp dir created inside it (claude walks up from cwd)."""
+    parent = tmp / "trust-parent"
+    child = parent / "a" / "b"
+    child.mkdir(parents=True)
+    state = _trust_state(tmp, "s2.json", {os.path.realpath(str(parent)): {"hasTrustDialogAccepted": True}})
+    assert sc.is_claude_trusted(str(child), state_file=state) is True
+
+
+def test_untrusted_dir(sc, tmp):
+    target = tmp / "trust-none"
+    target.mkdir()
+    state = _trust_state(tmp, "s3.json", {"/some/other": {"hasTrustDialogAccepted": True}})
+    assert sc.is_claude_trusted(str(target), state_file=state) is False
+    # accepted=False must not count as trusted either
+    state2 = _trust_state(tmp, "s4.json", {os.path.realpath(str(target)): {"hasTrustDialogAccepted": False}})
+    assert sc.is_claude_trusted(str(target), state_file=state2) is False
+
+
+def test_missing_or_corrupt_state_is_untrusted(sc, tmp):
+    """Fail closed: if we can't read ~/.claude.json we assume untrusted."""
+    target = tmp / "trust-fail-closed"
+    target.mkdir()
+    assert sc.is_claude_trusted(str(target), state_file=tmp / "nope.json") is False
+    corrupt = tmp / "corrupt.json"
+    corrupt.write_text("{not json")
+    assert sc.is_claude_trusted(str(target), state_file=corrupt) is False
+
+
+def test_trusted_resolves_realpath(sc, tmp):
+    """claude keys trust by realpath (/var/folders -> /private/var/...);
+    a symlinked path must match its resolved target's record."""
+    real = tmp / "trust-real"
+    real.mkdir()
+    link = tmp / "trust-link"
+    link.symlink_to(real)
+    state = _trust_state(tmp, "s5.json", {os.path.realpath(str(real)): {"hasTrustDialogAccepted": True}})
+    assert sc.is_claude_trusted(str(link), state_file=state) is True
 
 
 def test_record_launch_uses_given_cwd(sc, tmp):
@@ -135,7 +187,12 @@ def main() -> None:
         test_flag_off_by_default(sc)
         test_short_and_long_flag(sc)
         test_temp_combines_with_passthrough(sc)
-        test_make_temp_dir_creates_real_dir(sc)
+        test_make_temp_dir_creates_real_dir_under_parent(sc, tmp)
+        test_trusted_exact_dir(sc, tmp)
+        test_trusted_via_ancestor(sc, tmp)
+        test_untrusted_dir(sc, tmp)
+        test_missing_or_corrupt_state_is_untrusted(sc, tmp)
+        test_trusted_resolves_realpath(sc, tmp)
         test_record_launch_uses_given_cwd(sc, tmp)
         test_codex_flag_off_by_default(sc)
         test_codex_flag_on(sc)

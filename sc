@@ -256,12 +256,52 @@ def write_keychain_deny_profile() -> str | None:
     return str(path)
 
 
+CLAUDE_STATE_FILE = Path.home() / ".claude.json"
+TEMP_PARENT = Path(tempfile.gettempdir()) / "sc"
+
+
+def is_claude_trusted(path: str, state_file: Path = CLAUDE_STATE_FILE) -> bool:
+    """True if PATH is covered by a folder-trust record in ~/.claude.json.
+    Claude Code accepts trust from the dir itself or ANY ancestor, keyed by
+    realpath (verified against the trust gate in claude 2.1.220), so walk up.
+    Missing/corrupt state file counts as untrusted (fail closed)."""
+    try:
+        data = json.loads(state_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        return False
+    p = os.path.realpath(path)
+    while True:
+        if isinstance(projects.get(p), dict) and projects[p].get("hasTrustDialogAccepted") is True:
+            return True
+        parent = os.path.dirname(p)
+        if parent == p:
+            return False
+        p = parent
+
+
+def require_trusted_temp_parent() -> None:
+    """Stop with setup instructions unless Claude Code trusts TEMP_PARENT.
+    sc never writes to ~/.claude.json; the user grants trust once per machine
+    by accepting claude's folder-trust prompt inside TEMP_PARENT."""
+    if is_claude_trusted(str(TEMP_PARENT)):
+        return
+    TEMP_PARENT.mkdir(parents=True, exist_ok=True)  # so the cd below works
+    fail(
+        f"Error: Claude Code has not trusted the sc temp parent dir: {TEMP_PARENT}\n"
+        "Without it, every `sc -t` launch shows the folder-trust prompt.\n"
+        "One-time setup (per machine):\n"
+        f"    cd {TEMP_PARENT} && claude\n"
+        "Accept the folder-trust prompt, exit claude, then re-run sc -t."
+    )
+
+
 def make_temp_dir() -> str:
-    """Create a fresh temp dir with `mktemp -d` and return its path."""
-    result = subprocess.run(["mktemp", "-d"], capture_output=True, text=True)
-    if result.returncode != 0 or not result.stdout.strip():
-        fail(f"Error: mktemp -d failed: {result.stderr.strip() or 'no output'}")
-    return result.stdout.strip()
+    """Create a fresh temp dir under TEMP_PARENT and return its path."""
+    TEMP_PARENT.mkdir(parents=True, exist_ok=True)
+    return tempfile.mkdtemp(dir=TEMP_PARENT)
 
 
 def load_history() -> list[dict]:
@@ -351,9 +391,12 @@ Options:
                        ~/.claude/.credentials.json).
   -y                   Pass the agent's "skip all prompts" flag
                        (claude: --dangerously-skip-permissions; see --codex).
-  -t, --temp           Create a fresh temp dir (mktemp -d), cd into it, mount
-                       it read/write, and launch claude there. No repo is
-                       auto-shared (the temp dir isn't a git repo).
+  -t, --temp           Create a fresh temp dir under $TMPDIR/sc, cd into it,
+                       mount it read/write, and launch claude there. No repo
+                       is auto-shared (the temp dir isn't a git repo). For
+                       claude launches, $TMPDIR/sc must have been trusted once
+                       (run claude there and accept the folder-trust prompt);
+                       otherwise sc stops with setup instructions.
   -r, --repo-root      cd into the git repo root before launching, instead of
                        the current dir. The repo root is auto-shared rw either
                        way; this only changes claude's starting directory.
@@ -538,6 +581,8 @@ def main() -> None:
     # git rev-parse runs in the (repo-less) temp dir and shares nothing extra.
     temp_dir = ""
     if temp:
+        if not codex and not shell:
+            require_trusted_temp_parent()
         temp_dir = make_temp_dir()
         os.chdir(temp_dir)
         err(f"Temp dir: {temp_dir} (rw, cwd)")
