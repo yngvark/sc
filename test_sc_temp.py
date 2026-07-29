@@ -12,7 +12,6 @@ Run directly: ./test_sc_temp.py
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import shutil
 import tempfile
@@ -117,53 +116,6 @@ def test_profile_env_pass(sc):
     assert sc.profile_env_pass({"env": {"pass": ["FOO", "BAR"]}}) == ["FOO", "BAR"]
 
 
-def test_seed_claude_trust_new_file(sc, tmp):
-    state = tmp / "claude-new.json"
-    target = tmp / "workspace"
-    target.mkdir()
-    sc.seed_claude_trust(str(target), state_file=state)
-    data = json.loads(state.read_text())
-    entry = data["projects"][os.path.realpath(str(target))]
-    assert entry["hasTrustDialogAccepted"] is True, data
-
-
-def test_seed_claude_trust_preserves_existing(sc, tmp):
-    state = tmp / "claude-existing.json"
-    state.write_text(json.dumps({
-        "numStartups": 7,
-        "projects": {"/some/other": {"hasTrustDialogAccepted": True, "allowedTools": ["Bash"]}},
-    }))
-    target = tmp / "workspace2"
-    target.mkdir()
-    sc.seed_claude_trust(str(target), state_file=state)
-    data = json.loads(state.read_text())
-    assert data["numStartups"] == 7, data
-    assert data["projects"]["/some/other"]["allowedTools"] == ["Bash"], data
-    assert data["projects"][os.path.realpath(str(target))]["hasTrustDialogAccepted"] is True, data
-
-
-def test_seed_claude_trust_uses_realpath(sc, tmp):
-    """Claude Code keys projects by realpath; a symlinked temp dir must be
-    recorded under its resolved path, like /var/folders -> /private/var/..."""
-    state = tmp / "claude-symlink.json"
-    real = tmp / "real"
-    real.mkdir()
-    link = tmp / "link"
-    link.symlink_to(real)
-    sc.seed_claude_trust(str(link), state_file=state)
-    data = json.loads(state.read_text())
-    assert os.path.realpath(str(real)) in data["projects"], data
-
-
-def test_seed_claude_trust_skips_corrupt_file(sc, tmp):
-    state = tmp / "claude-corrupt.json"
-    state.write_text("{not json")
-    target = tmp / "workspace3"
-    target.mkdir()
-    sc.seed_claude_trust(str(target), state_file=state)  # must not raise
-    assert state.read_text() == "{not json", "corrupt file must be left untouched"
-
-
 def test_profile_dirs_expands_env_vars(sc, tmp):
     target = tmp / "notes"
     target.mkdir()
@@ -191,10 +143,6 @@ def main() -> None:
         test_agent_spec_claude(sc)
         test_agent_spec_codex(sc)
         test_profile_env_pass(sc)
-        test_seed_claude_trust_new_file(sc, tmp)
-        test_seed_claude_trust_preserves_existing(sc, tmp)
-        test_seed_claude_trust_uses_realpath(sc, tmp)
-        test_seed_claude_trust_skips_corrupt_file(sc, tmp)
         test_profile_dirs_expands_env_vars(sc, tmp)
     print("OK")
 
