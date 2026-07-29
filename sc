@@ -256,6 +256,29 @@ def write_keychain_deny_profile() -> str | None:
     return str(path)
 
 
+CLAUDE_STATE_FILE = Path.home() / ".claude.json"
+
+
+def seed_claude_trust(path: str, state_file: Path = CLAUDE_STATE_FILE) -> None:
+    """Pre-mark PATH as trusted in ~/.claude.json so Claude Code skips the
+    folder-trust prompt. Only used for -t temp dirs: they are empty and
+    created by sc itself, so trusting them is always safe. Claude Code keys
+    projects by realpath (/var/folders/... -> /private/var/folders/...)."""
+    try:
+        data = json.loads(state_file.read_text()) if state_file.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        err("Trust: could not read ~/.claude.json, skipping auto-trust")
+        return
+    entry = data.setdefault("projects", {}).setdefault(os.path.realpath(path), {})
+    entry["hasTrustDialogAccepted"] = True
+    try:
+        state_file.write_text(json.dumps(data, indent=2) + "\n")
+    except OSError as e:
+        err(f"Trust: could not update ~/.claude.json ({e}), skipping auto-trust")
+        return
+    err("Trust: temp dir pre-trusted in ~/.claude.json")
+
+
 def make_temp_dir() -> str:
     """Create a fresh temp dir with `mktemp -d` and return its path."""
     result = subprocess.run(["mktemp", "-d"], capture_output=True, text=True)
@@ -541,6 +564,8 @@ def main() -> None:
         temp_dir = make_temp_dir()
         os.chdir(temp_dir)
         err(f"Temp dir: {temp_dir} (rw, cwd)")
+        if not codex and not shell:
+            seed_claude_trust(temp_dir)
 
     err(f"Agent: {agent_bin}")
 
