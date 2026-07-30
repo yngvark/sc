@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -36,6 +37,15 @@ HISTORY_FILE = PROFILE_DIR / "history.jsonl"
 HISTORY_MAX = 100
 SAFEHOUSE = os.environ.get("SAFEHOUSE_BIN", "safehouse")
 
+# sc relies on safehouse's ssh integration allowing the launchd-managed
+# SSH_AUTH_SOCK socket under /var/run — macOS Tahoe 26.4 moved it there from
+# /private/tmp. Without that rule the sandbox cannot reach ssh-agent, so git
+# commit signing silently degrades to an interactive passphrase prompt that
+# nothing can answer, and the error names a passphrase rather than the sandbox.
+# safehouse 0.11.1 covers it (eugene1g/agent-safehouse#138), so that is the
+# floor: sc carried its own --append-profile workaround until then.
+MIN_SAFEHOUSE_VERSION = (0, 11, 1)
+
 # Shared with the retired claude-docker on purpose so the warm cache
 # survives the migration.
 KEYCHAIN_SERVICE = "claude-docker-github-token"
@@ -49,6 +59,47 @@ def err(msg: str) -> None:
 def fail(msg: str, code: int = 1) -> "NoReturn":  # type: ignore[name-defined]
     err(msg)
     sys.exit(code)
+
+
+def parse_version(text: str) -> tuple[int, ...] | None:
+    """The first dotted-numeric run in TEXT, e.g. `safehouse --version`'s
+    "Agent Safehouse 0.11.1" -> (0, 11, 1). None if there is none. A
+    pre-release suffix ("0.12.0-rc1") is dropped, which is accurate enough for
+    a >= floor check."""
+    m = re.search(r"\d+(?:\.\d+)*", text)
+    return tuple(int(p) for p in m.group(0).split(".")) if m else None
+
+
+def safehouse_version_too_old(version_output: str) -> tuple[int, ...] | None:
+    """The parsed version if it is below MIN_SAFEHOUSE_VERSION, else None.
+    Output with no version in it (an unexpected build) counts as new enough:
+    fail open, since blocking every launch on a failed guess is worse than the
+    signing breakage this guards against."""
+    version = parse_version(version_output)
+    if version is None or version >= MIN_SAFEHOUSE_VERSION:
+        return None
+    return version
+
+
+def require_safehouse_version(safehouse_bin: str) -> None:
+    """Abort if SAFEHOUSE_BIN is older than MIN_SAFEHOUSE_VERSION. A safehouse
+    that cannot be run or does not report a version is let through."""
+    try:
+        proc = subprocess.run(
+            [safehouse_bin, "--version"], capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    old = safehouse_version_too_old(proc.stdout + proc.stderr)
+    if old is None:
+        return
+    fail(
+        f"safe-claude: safehouse {'.'.join(map(str, old))} is too old — "
+        f"sc needs {'.'.join(map(str, MIN_SAFEHOUSE_VERSION))} or newer.\n"
+        "  Older versions block the ssh-agent socket on macOS Tahoe 26.4+, so git\n"
+        "  commit signing inside the sandbox fails with an unanswerable passphrase\n"
+        "  prompt. Upgrade with `brew upgrade agent-safehouse` or `safehouse update`."
+    )
 
 
 def discover_profiles() -> list[str]:
@@ -586,6 +637,7 @@ def main() -> None:
     safehouse_bin = shutil.which(SAFEHOUSE) or (SAFEHOUSE if Path(SAFEHOUSE).is_file() else None)
     if not safehouse_bin:
         fail(f"safe-claude: safehouse binary not found (tried '{SAFEHOUSE}')")
+    require_safehouse_version(safehouse_bin)
 
     if yes and not shell:
         passthrough.insert(0, yolo_flag)

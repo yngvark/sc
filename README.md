@@ -24,6 +24,13 @@ restores access if a tool genuinely needs it. See
 If you don't need a GitHub token, call `safehouse claude` directly. The
 wrapper is only useful for the `-p` (profile) flag.
 
+## Requirements
+
+safehouse 0.11.1 or newer. sc checks this on every launch and refuses to
+start on older versions, because they block the ssh-agent socket on recent
+macOS and the resulting failure looks like a git passphrase problem rather
+than a sandbox one. See `docs/safehouse-version-gate.md`.
+
 ## Layout
 
 ```
