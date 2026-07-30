@@ -256,6 +256,58 @@ def write_keychain_deny_profile() -> str | None:
     return str(path)
 
 
+# safehouse allows network-bind only for `(local ip)` plus a handful of named
+# unix sockets (Chrome/Codex/VS Code/agent-browser singletons). Tools that talk
+# to their own helper processes over a unix socket in the per-user temp dir are
+# therefore killed at bind() with "bind: operation not permitted" — writing the
+# socket file is allowed, listening on it is not.
+#
+# Each entry is a Seatbelt regex for the socket file's *basename* under
+# /var/folders/<x>/<y>/T/ (any depth). Add new cases as data here; do NOT widen
+# this to the whole temp dir: safehouse deliberately denies outbound to
+# vscode-git-*.sock / vscode-ipc-*.sock in that same dir (a host VS Code binds
+# those, outside the sandbox's trust boundary), and an appended blanket allow
+# would override those denies — Seatbelt takes the last match.
+TEMP_UNIX_SOCKET_BASENAMES = [
+    # hashicorp/go-plugin's provider handshake: it listens on
+    # $TMPDIR/plugin<random-digits> on every non-Windows platform. Used by
+    # terraform (`plan`/`apply`/`test` all launch providers), terragrunt,
+    # packer and vault. Without this, terraform dies with
+    # "plugin init error: listen unix …/T/plugin123: bind: operation not permitted".
+    r"plugin[0-9]+",
+]
+
+
+def temp_unix_socket_profile_text(
+    basenames: list[str] | None = None,
+) -> str:
+    """Seatbelt fragment allowing bind/listen/connect on the temp-dir unix
+    sockets listed in TEMP_UNIX_SOCKET_BASENAMES."""
+    names = "|".join(basenames if basenames is not None else TEMP_UNIX_SOCKET_BASENAMES)
+    # Match the per-user darwin temp dir by shape, not by literal path, so the
+    # fragment is machine-independent (mirrors safehouse's own /var/folders rules).
+    pattern = r"^(/private)?/var/folders/[^/]+/[^/]+/T/(.*/)?(" + names + r")$"
+    return f'''\
+;; sc: allow helper-process unix sockets inside the per-user temp dir
+;; (see TEMP_UNIX_SOCKET_BASENAMES in sc). safehouse's network-bind is
+;; ip-only, which breaks tools that IPC over a socket in $TMPDIR.
+(allow network-bind network-inbound
+    (local unix-socket (path-regex #"{pattern}")))
+(allow network-outbound
+    (remote unix-socket (path-regex #"{pattern}")))
+'''
+
+
+def write_temp_unix_socket_profile() -> str | None:
+    """Write the temp-dir unix-socket fragment for safehouse --append-profile
+    and return its path; None off-darwin. Overwritten on every launch."""
+    if sys.platform != "darwin":
+        return None
+    path = Path(tempfile.gettempdir()) / "sc-temp-unix-sockets.sb"
+    path.write_text(temp_unix_socket_profile_text())
+    return str(path)
+
+
 CLAUDE_STATE_FILE = Path.home() / ".claude.json"
 TEMP_PARENT = Path(tempfile.gettempdir()) / "sc"
 
@@ -651,6 +703,9 @@ def main() -> None:
     if ssh_agent_profile:
         safehouse_args.append(f"--append-profile={ssh_agent_profile}")
         err(f"SSH agent: allowing /var/run launchd socket via {ssh_agent_profile}")
+    unix_socket_profile = write_temp_unix_socket_profile()
+    if unix_socket_profile:
+        safehouse_args.append(f"--append-profile={unix_socket_profile}")
     if keychain:
         err("Keychain: allowed (--keychain)")
     else:
