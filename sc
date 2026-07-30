@@ -184,45 +184,6 @@ def agent_spec(codex: bool) -> tuple[str, str, str]:
     )
 
 
-# macOS 26 (Tahoe) relocated the launchd-managed ssh-agent socket that
-# SSH_AUTH_SOCK points at from /tmp/com.apple.launchd.*/Listeners to
-# /var/run/... . safehouse's `--enable=ssh` policy allows the /tmp and
-# /private/tmp variants (and ~/.ssh/agent) but NOT /var/run, so git commit
-# signing via the agent is blocked inside the sandbox and git falls back to
-# reading the passphrase-protected key file — which fails non-interactively.
-# This fragment re-allows the /var/run launchd socket class. (Root cause is an
-# upstream gap in safehouse's ssh.sb integration; drop this once fixed there.)
-SSH_AGENT_VAR_RUN_PROFILE = r'''
-;; sc: allow launchd-managed SSH agent socket under /var/run (macOS 26 Tahoe).
-;; safehouse --enable=ssh only covers the /tmp and /private/tmp variants.
-(allow file-read* file-write*
-    (regex #"^/private/var/run/com\.apple\.launchd\.[^/]+/Listeners$"))
-(allow network-outbound
-    (remote unix-socket (path-regex #"^/private/var/run/com\.apple\.launchd\.[^/]+/Listeners$")))
-'''
-
-
-def ssh_agent_needs_var_run_allow(sock: str) -> bool:
-    """True if SSH_AUTH_SOCK resolves to a /var/run launchd socket that
-    safehouse's ssh policy does not cover (macOS 26 Tahoe)."""
-    if not sock:
-        return False
-    return os.path.realpath(sock).startswith("/private/var/run/")
-
-
-def write_ssh_agent_profile() -> str | None:
-    """If the ssh-agent socket needs a policy allow, write the fragment to a
-    stable temp file and return its path for safehouse --append-profile; else
-    None. Safe to call every launch (the file is overwritten each time)."""
-    if sys.platform != "darwin":
-        return None
-    if not ssh_agent_needs_var_run_allow(os.environ.get("SSH_AUTH_SOCK", "")):
-        return None
-    path = Path(tempfile.gettempdir()) / "sc-ssh-agent.sb"
-    path.write_text(SSH_AGENT_VAR_RUN_PROFILE)
-    return str(path)
-
-
 # safehouse's claude/codex agent profiles auto-inject its keychain integration
 # (55-integrations-optional/keychain.sb) because agents may store their own
 # OAuth creds in the login keychain — but that opens the WHOLE login keychain,
@@ -699,10 +660,6 @@ def main() -> None:
         rw_dirs.append(str(Path("~/.aws").expanduser()))
 
     safehouse_args: list[str] = ["--enable=ssh", "--enable=playwright-chrome"]
-    ssh_agent_profile = write_ssh_agent_profile()
-    if ssh_agent_profile:
-        safehouse_args.append(f"--append-profile={ssh_agent_profile}")
-        err(f"SSH agent: allowing /var/run launchd socket via {ssh_agent_profile}")
     unix_socket_profile = write_temp_unix_socket_profile()
     if unix_socket_profile:
         safehouse_args.append(f"--append-profile={unix_socket_profile}")
