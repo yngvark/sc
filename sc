@@ -37,6 +37,14 @@ HISTORY_FILE = PROFILE_DIR / "history.jsonl"
 HISTORY_MAX = 100
 SAFEHOUSE = os.environ.get("SAFEHOUSE_BIN", "safehouse")
 
+# safehouse policy features sc always enables. Each entry is a `--enable=`
+# flag; add a case here rather than branching at launch time.
+SAFEHOUSE_FEATURES = [
+    "ssh",                  # git commit signing via ssh-agent
+    "playwright-chrome",    # playwright-cli / browser-driven verification
+    "docker",               # docker CLI + daemon socket
+]
+
 # sc relies on safehouse's ssh integration allowing the launchd-managed
 # SSH_AUTH_SOCK socket under /var/run — macOS Tahoe 26.4 moved it there from
 # /private/tmp. Without that rule the sandbox cannot reach ssh-agent, so git
@@ -711,7 +719,7 @@ def main() -> None:
     if aws:
         rw_dirs.append(str(Path("~/.aws").expanduser()))
 
-    safehouse_args: list[str] = ["--enable=ssh", "--enable=playwright-chrome"]
+    safehouse_args: list[str] = [f"--enable={f}" for f in SAFEHOUSE_FEATURES]
     unix_socket_profile = write_temp_unix_socket_profile()
     if unix_socket_profile:
         safehouse_args.append(f"--append-profile={unix_socket_profile}")

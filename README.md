@@ -31,6 +31,14 @@ start on older versions, because they block the ssh-agent socket on recent
 macOS and the resulting failure looks like a git passphrase problem rather
 than a sandbox one. See `docs/safehouse-version-gate.md`.
 
+## Enabled sandbox features
+
+Every launch passes a fixed set of `safehouse --enable=` features
+(`SAFEHOUSE_FEATURES` in `sc`): `ssh` for git commit signing, and
+`playwright-chrome` and `docker` because verifying a change in the sandbox
+otherwise fails as an unexplained "operation not permitted". See
+`docs/safehouse-features.md`.
+
 ## Layout
 
 ```
@@ -96,7 +104,7 @@ For sandbox scope not covered by the wrapper, use `safe` (or `safehouse`)
 directly:
 
 ```
-safe --enable=docker docker ps
+safe --enable=kubectl kubectl get pods
 safe --add-dirs=~/src/monorepo -- claude --dangerously-skip-permissions
 safe --workdir=/tmp/scratch -- bash
 ```
