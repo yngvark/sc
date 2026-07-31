@@ -39,6 +39,14 @@ Every launch passes a fixed set of `safehouse --enable=` features
 otherwise fails as an unexplained "operation not permitted". See
 `docs/safehouse-features.md`.
 
+## AWS readiness gate
+
+`sc -a` refuses to launch unless `AWS_PROFILE` is set and its credentials
+actually resolve, checked on the host with `aws configure export-credentials`.
+Both failures — an unset profile and an expired SSO login — otherwise surface
+much later as an opaque credentials error from whatever the agent was doing
+inside the sandbox. See `docs/aws-readiness-gate.md`.
+
 ## Layout
 
 ```
@@ -70,7 +78,7 @@ sc                            # claude in sandbox, use persisted profile (if any
 sc -p                         # fzf-pick a profile, persist
 sc -p <name>                  # use the named profile, persist
 sc -P                         # explicitly use no profile (no token, no dirs)
-sc -a                         # mount ~/.aws (rw) and pass AWS_PROFILE
+sc -a                         # mount ~/.aws (rw) and pass AWS_PROFILE (checks login first)
 sc -k                         # allow macOS Keychain access (denied by default)
 sc -y                         # pass the agent's "skip all prompts" flag
 sc --codex                    # run codex instead of claude (mounts ~/.codex rw)

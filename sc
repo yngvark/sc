@@ -110,6 +110,69 @@ def require_safehouse_version(safehouse_bin: str) -> None:
     )
 
 
+# `aws configure export-credentials` resolves credentials exactly the way the
+# SDKs do — env vars, config file, SSO and assume-role caches, credential_process
+# — and exits non-zero when there are none or the cached SSO token has expired.
+# Unlike `sts get-caller-identity` it needs no network round-trip, so it is cheap
+# enough to run on every launch. Its *stdout* contains the secret access key, so
+# only stderr is ever surfaced.
+AWS_LOGIN_CHECK_ARGS = ["configure", "export-credentials"]
+AWS_LOGIN_CHECK_TIMEOUT = 20
+
+
+def aws_error_text(stderr: str) -> str:
+    """The aws CLI's complaint, trimmed to one line for reporting. Takes the
+    last non-empty stderr line (the CLI prints a leading blank one) and drops
+    its `aws: [ERROR]:` prefix."""
+    lines = [line.strip() for line in stderr.strip().splitlines() if line.strip()]
+    if not lines:
+        return "aws reported no usable credentials (and printed no error)"
+    return re.sub(r"^aws:\s*\[ERROR\]:\s*", "", lines[-1])
+
+
+def aws_login_error(profile: str) -> str | None:
+    """None if PROFILE's credentials resolve, else the aws CLI's error text.
+    An `aws` that is missing or cannot be run counts as fine: blocking the
+    launch on a check that could not run is worse than the confusing in-sandbox
+    failure it guards against (same fail-open stance as the safehouse gate)."""
+    aws_bin = shutil.which("aws")
+    if aws_bin is None:
+        err("AWS: `aws` not found on PATH — skipping the credentials check")
+        return None
+    try:
+        proc = subprocess.run(
+            [aws_bin, *AWS_LOGIN_CHECK_ARGS, "--profile", profile],
+            capture_output=True, text=True, timeout=AWS_LOGIN_CHECK_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        err("AWS: credentials check could not run — skipping it")
+        return None
+    return None if proc.returncode == 0 else aws_error_text(proc.stderr)
+
+
+def require_aws_ready() -> str:
+    """Abort unless AWS_PROFILE is set and its credentials resolve; return the
+    profile name. Runs on the host, before the sandbox exists, because that is
+    where `aws`, ~/.aws and the SSO cache are reachable. Inside the sandbox the
+    same failure shows up much later as an opaque credentials error."""
+    profile = os.environ.get("AWS_PROFILE", "").strip()
+    if not profile:
+        fail(
+            "Error: -a/--aws requires AWS_PROFILE, but it is unset.\n"
+            "  sc forwards AWS_PROFILE into the sandbox; with nothing to forward,\n"
+            "  every aws command inside it fails to find credentials.\n"
+            "  Set it first, e.g. `export AWS_PROFILE=<name>`."
+        )
+    error = aws_login_error(profile)
+    if error is not None:
+        fail(
+            f"Error: AWS profile '{profile}' has no usable credentials.\n"
+            f"  aws says: {error}\n"
+            f"  Log in first, e.g. `aws sso login --profile {profile}`, then re-run."
+        )
+    return profile
+
+
 def discover_profiles() -> list[str]:
     if not PROFILES_DIR.is_dir():
         return []
@@ -453,6 +516,10 @@ Options:
   -a, --aws            Mount ~/.aws read/write into the sandbox and pass
                        AWS_PROFILE through. Needed for SSO/role caches that
                        AWS CLI writes back to ~/.aws/{sso,cli}/cache.
+                       Refuses to launch unless AWS_PROFILE is set and its
+                       credentials resolve (`aws configure export-credentials`),
+                       so an expired SSO login is reported here instead of
+                       surfacing inside the sandbox.
   -k, --keychain       Allow macOS Keychain access inside the sandbox. By
                        default sc denies it (securityd IPC + keychain files),
                        so login-keychain secrets — e.g. gh's keyring OAuth
@@ -647,6 +714,8 @@ def main() -> None:
         fail(f"safe-claude: safehouse binary not found (tried '{SAFEHOUSE}')")
     require_safehouse_version(safehouse_bin)
 
+    aws_profile = require_aws_ready() if aws else ""
+
     if yes and not shell:
         passthrough.insert(0, yolo_flag)
 
@@ -737,7 +806,7 @@ def main() -> None:
 
     if aws:
         safehouse_args.append("--env-pass=AWS_PROFILE")
-        err(f"AWS: sharing ~/.aws (rw), AWS_PROFILE={os.environ.get('AWS_PROFILE', '(unset)')}")
+        err(f"AWS: sharing ~/.aws (rw), AWS_PROFILE={aws_profile} (credentials OK)")
 
     for var in profile_env_pass(profile):
         safehouse_args.append(f"--env-pass={var}")
