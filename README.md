@@ -41,11 +41,11 @@ otherwise fails as an unexplained "operation not permitted". See
 
 ## AWS readiness gate
 
-`sc -a` refuses to launch unless `AWS_PROFILE` is set and its credentials
+When `AWS_PROFILE` is set, `sc -a` refuses to launch unless its credentials
 actually resolve, checked on the host with `aws configure export-credentials`.
-Both failures — an unset profile and an expired SSO login — otherwise surface
-much later as an opaque credentials error from whatever the agent was doing
-inside the sandbox. See `docs/aws-readiness-gate.md`.
+An expired SSO login otherwise surfaces much later as an opaque credentials
+error from whatever the agent was doing inside the sandbox. An unset
+`AWS_PROFILE` only gets a note. See `docs/aws-readiness-gate.md`.
 
 ## Layout
 

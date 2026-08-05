@@ -150,19 +150,17 @@ def aws_login_error(profile: str) -> str | None:
     return None if proc.returncode == 0 else aws_error_text(proc.stderr)
 
 
-def require_aws_ready() -> str:
-    """Abort unless AWS_PROFILE is set and its credentials resolve; return the
-    profile name. Runs on the host, before the sandbox exists, because that is
-    where `aws`, ~/.aws and the SSO cache are reachable. Inside the sandbox the
-    same failure shows up much later as an opaque credentials error."""
+def check_aws_ready() -> str:
+    """The AWS_PROFILE to forward, "" if there is none. Aborts when a profile is
+    set but its credentials do not resolve. Runs on the host, before the sandbox
+    exists, because that is where `aws`, ~/.aws and the SSO cache are reachable;
+    inside the sandbox the same failure shows up much later as an opaque
+    credentials error. An unset AWS_PROFILE is fine: -a exists to share the
+    credentials dir, and the profile can be chosen or changed inside the
+    session."""
     profile = os.environ.get("AWS_PROFILE", "").strip()
     if not profile:
-        fail(
-            "Error: -a/--aws requires AWS_PROFILE, but it is unset.\n"
-            "  sc forwards AWS_PROFILE into the sandbox; with nothing to forward,\n"
-            "  every aws command inside it fails to find credentials.\n"
-            "  Set it first, e.g. `export AWS_PROFILE=<name>`."
-        )
+        return ""
     error = aws_login_error(profile)
     if error is not None:
         fail(
@@ -516,10 +514,11 @@ Options:
   -a, --aws            Mount ~/.aws read/write into the sandbox and pass
                        AWS_PROFILE through. Needed for SSO/role caches that
                        AWS CLI writes back to ~/.aws/{sso,cli}/cache.
-                       Refuses to launch unless AWS_PROFILE is set and its
-                       credentials resolve (`aws configure export-credentials`),
-                       so an expired SSO login is reported here instead of
-                       surfacing inside the sandbox.
+                       If AWS_PROFILE is set, its credentials must resolve
+                       (`aws configure export-credentials`) or sc refuses to
+                       launch, so an expired SSO login is reported here instead
+                       of surfacing inside the sandbox. An unset AWS_PROFILE is
+                       fine — pick one inside the session.
   -k, --keychain       Allow macOS Keychain access inside the sandbox. By
                        default sc denies it (securityd IPC + keychain files),
                        so login-keychain secrets — e.g. gh's keyring OAuth
@@ -714,7 +713,7 @@ def main() -> None:
         fail(f"safe-claude: safehouse binary not found (tried '{SAFEHOUSE}')")
     require_safehouse_version(safehouse_bin)
 
-    aws_profile = require_aws_ready() if aws else ""
+    aws_profile = check_aws_ready() if aws else ""
 
     if yes and not shell:
         passthrough.insert(0, yolo_flag)
@@ -806,7 +805,10 @@ def main() -> None:
 
     if aws:
         safehouse_args.append("--env-pass=AWS_PROFILE")
-        err(f"AWS: sharing ~/.aws (rw), AWS_PROFILE={aws_profile} (credentials OK)")
+        if aws_profile:
+            err(f"AWS: sharing ~/.aws (rw), AWS_PROFILE={aws_profile} (credentials OK)")
+        else:
+            err("AWS: sharing ~/.aws (rw), AWS_PROFILE unset (set one in the session)")
 
     for var in profile_env_pass(profile):
         safehouse_args.append(f"--env-pass={var}")

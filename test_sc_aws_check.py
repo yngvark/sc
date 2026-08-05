@@ -4,9 +4,10 @@
 # ///
 """Tests for the -a/--aws readiness gate.
 
-`sc -a` mounts ~/.aws and forwards AWS_PROFILE, but neither is worth anything if
-AWS_PROFILE is unset or the SSO login has expired — inside the sandbox that only
-surfaces later as an opaque credentials error. sc refuses to launch instead.
+`sc -a` mounts ~/.aws and forwards AWS_PROFILE. A set-but-expired AWS_PROFILE is
+worthless — inside the sandbox that only surfaces later as an opaque credentials
+error — so sc refuses to launch. An unset AWS_PROFILE only gets a note: sharing
+the credentials dir is the point of -a, and the profile can change in-session.
 
 Run directly: ./test_sc_aws_check.py
 
@@ -133,19 +134,20 @@ def _run_sc(
     )
 
 
-def test_e2e_unset_aws_profile_blocks_launch(tmp_dir: str) -> None:
-    r = _run_sc(tmp_dir, aws_profile=None, aws_exit=0)
-    assert r.returncode == 1, f"expected the gate to abort: {r.returncode}\n{r.stderr}"
-    assert "AWS_PROFILE" in r.stderr and "unset" in r.stderr, r.stderr
-    assert "export AWS_PROFILE=" in r.stderr, r.stderr
-    assert "Launching:" not in r.stderr, r.stderr
+def test_e2e_unset_aws_profile_still_launches(tmp_dir: str) -> None:
+    """-a is about sharing ~/.aws; the profile may be chosen inside the session,
+    so an unset AWS_PROFILE is reported and the launch proceeds."""
+    r = _run_sc(tmp_dir, aws_profile=None, aws_exit=253, aws_stderr="no credentials found")
+    assert r.returncode == 99, f"gate blocked the launch: {r.returncode}\n{r.stderr}"
+    assert "AWS_PROFILE unset" in r.stderr, r.stderr
+    # With no profile to name, there is nothing to check — `aws` is never run.
+    assert not (Path(tmp_dir) / "aws-bin" / "args.log").exists(), "aws was run anyway"
 
 
-def test_e2e_empty_aws_profile_blocks_launch(tmp_dir: str) -> None:
-    """An exported-but-empty AWS_PROFILE is as useless as an unset one."""
-    r = _run_sc(tmp_dir, aws_profile="   ", aws_exit=0)
-    assert r.returncode == 1, r.stderr
-    assert "unset" in r.stderr, r.stderr
+def test_e2e_empty_aws_profile_is_treated_as_unset(tmp_dir: str) -> None:
+    r = _run_sc(tmp_dir, aws_profile="   ", aws_exit=253, aws_stderr="no credentials found")
+    assert r.returncode == 99, r.stderr
+    assert "AWS_PROFILE unset" in r.stderr, r.stderr
 
 
 def test_e2e_expired_login_blocks_launch(tmp_dir: str) -> None:
@@ -202,8 +204,8 @@ def main() -> None:
         test_missing_aws_binary_fails_open(sc, tmp_dir)
 
     for name in (
-        test_e2e_unset_aws_profile_blocks_launch,
-        test_e2e_empty_aws_profile_blocks_launch,
+        test_e2e_unset_aws_profile_still_launches,
+        test_e2e_empty_aws_profile_is_treated_as_unset,
         test_e2e_expired_login_blocks_launch,
         test_e2e_logged_in_passes_gate,
         test_e2e_without_the_flag_there_is_no_aws_gate,

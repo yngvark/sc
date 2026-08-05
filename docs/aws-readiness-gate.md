@@ -3,15 +3,8 @@
 ## What it does
 
 `sc -a` mounts `~/.aws` read/write and forwards `AWS_PROFILE` into the sandbox.
-Before doing either, it now refuses to launch unless AWS is actually usable —
-`AWS_PROFILE` must be set, and its credentials must resolve on the host:
-
-```
-Error: -a/--aws requires AWS_PROFILE, but it is unset.
-  sc forwards AWS_PROFILE into the sandbox; with nothing to forward,
-  every aws command inside it fails to find credentials.
-  Set it first, e.g. `export AWS_PROFILE=<name>`.
-```
+If `AWS_PROFILE` is set, sc first verifies on the host that its credentials
+resolve, and refuses to launch when they do not:
 
 ```
 Error: AWS profile 'my-sso' has no usable credentials.
@@ -19,10 +12,17 @@ Error: AWS profile 'my-sso' has no usable credentials.
   Log in first, e.g. `aws sso login --profile my-sso`, then re-run.
 ```
 
-On success the existing startup line gains a confirmation:
+On success the startup line confirms what was checked:
 
 ```
 AWS: sharing ~/.aws (rw), AWS_PROFILE=my-sso (credentials OK)
+```
+
+With no `AWS_PROFILE` there is nothing to check and nothing to block on — sc
+says so and launches:
+
+```
+AWS: sharing ~/.aws (rw), AWS_PROFILE unset (set one in the session)
 ```
 
 The check runs right after the safehouse version gate — before the temp dir,
@@ -31,23 +31,26 @@ side effects, not even a history entry.
 
 ## Why the check exists
 
-`-a` is the flag you pass when the agent's job involves AWS, and both failure
-modes are silent at launch time and confusing later:
+`-a` is the flag you pass when the agent's job involves AWS, and an expired SSO
+login is silent at launch time: the mounted `~/.aws/sso/cache` looks fine, the
+token in it does not. SSO tokens expire on a working-day timescale, so this is
+the common case, not an edge case.
 
-- **Unset `AWS_PROFILE`.** sc forwards the variable, not your shell's whole
-  profile-resolution context. Unset means nothing is forwarded, and unlike on
-  the host there is no interactive shell around to notice.
-- **Expired SSO login.** The mounted `~/.aws/sso/cache` looks fine; the token
-  in it does not. SSO tokens expire on a working-day timescale, so this is the
-  common case, not an edge case.
-
-Either way the symptom arrives minutes later, mid-task, as an AWS API error
-attributed to whatever the agent happened to be running — a terraform plan, a
-CLI call in a script — rather than to the launch. The fix (`aws sso login`,
-which opens a browser) belongs on the host, so the whole detour is avoidable by
-checking one command before the sandbox exists.
+The symptom arrives minutes later, mid-task, as an AWS API error attributed to
+whatever the agent happened to be running — a terraform plan, a CLI call in a
+script — rather than to the launch. The fix (`aws sso login`, which opens a
+browser) belongs on the host, so the whole detour is avoidable by checking one
+command before the sandbox exists.
 
 ## Design decisions
+
+**An unset `AWS_PROFILE` is not an error.** The purpose of `-a` is to share the
+credentials directory; forwarding `AWS_PROFILE` is a convenience on top. The
+profile is a per-command choice (`aws --profile`, `AWS_PROFILE=… terraform …`)
+that can be set or changed inside the session, so demanding one on the host
+would refuse launches that go on to work fine. A profile that *is* set is
+different: every aws command in the session inherits it, so a broken one is
+worth blocking on.
 
 **`aws configure export-credentials`, not `sts get-caller-identity`.**
 `export-credentials` resolves credentials the way the SDKs do — env vars, config
@@ -72,12 +75,10 @@ that errors or times out, lets the launch proceed with a note on stderr. This
 matches the safehouse version gate: blocking a launch because a guard could not
 run is worse than the confusion it prevents.
 
-**Hard fail, no escape hatch.** Both conditions abort rather than warn — sc's
-startup already prints several lines, and a warning about a failure that
-arrives minutes later would scroll past unread. There is no skip flag either:
-omitting `-a` is the escape hatch, since a launch that does not share `~/.aws`
-has nothing to check. Worth adding a flag only if a real case for "mount
-`~/.aws` while logged out" appears.
+**Hard fail, no escape hatch.** A set-but-unusable profile aborts rather than
+warns — sc's startup already prints several lines, and a warning about a failure
+that arrives minutes later would scroll past unread. There is no skip flag
+either: unsetting `AWS_PROFILE` (or omitting `-a`) is the escape hatch.
 
 **Only under `-a`.** A launch without the flag never touches AWS, so it must
 not pay the check or inherit its failure modes.
@@ -90,14 +91,15 @@ not pay the check or inherit its failure modes.
   `aws: [ERROR]:` prefix), unprefixed output, and empty output
 - `aws_login_error` following the stub `aws` exit code, and failing open when
   no `aws` is on `PATH`
-- end-to-end against stub `aws` and `safehouse` binaries: unset and
-  whitespace-only `AWS_PROFILE` abort; an expired login aborts with the
-  profile name, what `aws` said, and the `aws sso login` hint; neither reaches
-  `Launching:`
+- end-to-end against stub `aws` and `safehouse` binaries: an expired login
+  aborts with the profile name, what `aws` said, and the `aws sso login` hint,
+  without reaching `Launching:`
 - end-to-end pass case: exec is reached (the stub's exit 99), the confirmation
   line is printed, the stub was called with exactly
   `configure export-credentials --profile my-sso`, and no credential material
   from its stdout appears in sc's output
+- end-to-end that unset and whitespace-only `AWS_PROFILE` reach exec, print the
+  unset note, and never invoke `aws` — even when the stub `aws` would fail
 - that a launch without `-a` is neither gated nor mentions AWS, even with a
   broken login
 
