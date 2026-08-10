@@ -16,6 +16,11 @@ plugin init error: error="listen unix /var/folders/.../T/plugin501607228: bind: 
 The same library backs terragrunt, packer and vault plugins, so they are covered
 too.
 
+`@playwright/cli` is the other covered case. Its client spawns a browser daemon
+and reaches it over `$TMPDIR/playwright-cli/<workspace-hash>/<session>.sock`,
+with a devtools singleton one level up at `playwright-cli/devtools.sock`. The
+session name comes from `--session`, so the leaf is matched as a wildcard.
+
 ## Why the sandbox blocks it
 
 safehouse's `20-network.sb` grants `network-bind` for IP sockets only:
@@ -39,13 +44,17 @@ cannot be lifted from inside.
 
 `temp_unix_socket_profile_text()` renders a Seatbelt fragment appended via
 `safehouse --append-profile`, allowing bind/listen *and* connect for the socket
-names listed in `TEMP_UNIX_SOCKET_BASENAMES`. Both directions are needed: the
+names listed in `TEMP_UNIX_SOCKET_NAMES`. Both directions are needed: the
 provider listens, and Terraform core connects. Applied on every macOS launch —
 it grants nothing until a process actually binds a matching name.
 
+An entry is a regex for a bare basename (`plugin[0-9]+`) or, when the tool nests
+its sockets, a `subdir/name` tail (`playwright-cli/([^/]+/)?[^/]+\.sock`).
+Either form is matched at any depth below the temp dir.
+
 Two constraints shape it:
 
-- **Scoped to socket basenames, not to the temp dir as a whole.** safehouse
+- **Scoped to socket names, not to the temp dir as a whole.** safehouse
   deliberately *denies* outbound connections to `vscode-git-*.sock` and
   `vscode-ipc-*.sock` in that same directory, because a VS Code running outside
   the sandbox binds them — connecting would hand git credentials and
@@ -65,14 +74,16 @@ directory produces `bind: invalid argument` regardless of policy.
 `test_sc_unix_sockets.py`:
 
 - fragment content — both directions present, name-anchored, no literal
-  local paths;
-- the basename list drives the regex (nothing hardcoded in the renderer);
+  local paths; the rendered regex matches the real terraform and playwright-cli
+  socket paths and not neighbouring `.sock` files;
+- the name list drives the regex (nothing hardcoded in the renderer);
 - stable fragment path across launches;
 - **compile check** — generates the full safehouse policy with the fragment and
   runs `sandbox-exec -f`. `sandbox-exec` compiles before applying, so a Seatbelt
   syntax error is caught even from inside a sandbox, where the apply step itself
   is denied. Mutating the fragment to invalid syntax fails this test.
-- **bind check** — under the real policy, `plugin<pid>` binds and connects,
-  while an unlisted name in the same directory stays denied. Requires a
+- **bind check** — under the real policy, `plugin<pid>` and
+  `playwright-cli/<dir>/default.sock` bind and connect, while an unlisted name
+  in the same directory stays denied. Requires a
   non-nested shell (nested `sandbox_apply` is refused), so it self-skips inside
   `sc` and prints why.

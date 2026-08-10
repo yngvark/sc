@@ -343,34 +343,41 @@ def write_keychain_deny_profile() -> str | None:
 # therefore killed at bind() with "bind: operation not permitted" — writing the
 # socket file is allowed, listening on it is not.
 #
-# Each entry is a Seatbelt regex for the socket file's *basename* under
-# /var/folders/<x>/<y>/T/ (any depth). Add new cases as data here; do NOT widen
-# this to the whole temp dir: safehouse deliberately denies outbound to
+# Each entry is a Seatbelt regex for the socket file's name — a bare basename,
+# or a `subdir/name` tail when the tool nests its sockets — matched at any depth
+# under /var/folders/<x>/<y>/T/. Add new cases as data here; do NOT widen this
+# to the whole temp dir: safehouse deliberately denies outbound to
 # vscode-git-*.sock / vscode-ipc-*.sock in that same dir (a host VS Code binds
 # those, outside the sandbox's trust boundary), and an appended blanket allow
 # would override those denies — Seatbelt takes the last match.
-TEMP_UNIX_SOCKET_BASENAMES = [
+TEMP_UNIX_SOCKET_NAMES = [
     # hashicorp/go-plugin's provider handshake: it listens on
     # $TMPDIR/plugin<random-digits> on every non-Windows platform. Used by
     # terraform (`plan`/`apply`/`test` all launch providers), terragrunt,
     # packer and vault. Without this, terraform dies with
     # "plugin init error: listen unix …/T/plugin123: bind: operation not permitted".
     r"plugin[0-9]+",
+    # @playwright/cli's daemon: the client spawns a browser daemon and reaches
+    # it over $TMPDIR/playwright-cli/<workspace-hash>/<session>.sock, plus a
+    # devtools singleton at $TMPDIR/playwright-cli/devtools.sock. The session
+    # name comes from `--session`, so the leaf stays a wildcard. Without this,
+    # `playwright-cli open` dies with "listen EPERM … /default.sock".
+    r"playwright-cli/([^/]+/)?[^/]+\.sock",
 ]
 
 
 def temp_unix_socket_profile_text(
-    basenames: list[str] | None = None,
+    names_list: list[str] | None = None,
 ) -> str:
     """Seatbelt fragment allowing bind/listen/connect on the temp-dir unix
-    sockets listed in TEMP_UNIX_SOCKET_BASENAMES."""
-    names = "|".join(basenames if basenames is not None else TEMP_UNIX_SOCKET_BASENAMES)
+    sockets listed in TEMP_UNIX_SOCKET_NAMES."""
+    names = "|".join(names_list if names_list is not None else TEMP_UNIX_SOCKET_NAMES)
     # Match the per-user darwin temp dir by shape, not by literal path, so the
     # fragment is machine-independent (mirrors safehouse's own /var/folders rules).
     pattern = r"^(/private)?/var/folders/[^/]+/[^/]+/T/(.*/)?(" + names + r")$"
     return f'''\
 ;; sc: allow helper-process unix sockets inside the per-user temp dir
-;; (see TEMP_UNIX_SOCKET_BASENAMES in sc). safehouse's network-bind is
+;; (see TEMP_UNIX_SOCKET_NAMES in sc). safehouse's network-bind is
 ;; ip-only, which breaks tools that IPC over a socket in $TMPDIR.
 (allow network-bind network-inbound
     (local unix-socket (path-regex #"{pattern}")))

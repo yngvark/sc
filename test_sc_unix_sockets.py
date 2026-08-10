@@ -6,7 +6,7 @@
 
 safehouse's network-bind is ip-only, so a helper process that listens on a
 unix socket in $TMPDIR dies at bind(). sc appends a fragment re-allowing the
-socket names in TEMP_UNIX_SOCKET_BASENAMES.
+socket names in TEMP_UNIX_SOCKET_NAMES.
 
 Run directly: ./test_sc_unix_sockets.py
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,10 +26,12 @@ import tempfile
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
-# Binds, listens on and connects to $TMPDIR/<basename>, then cleans up.
+# Binds, listens on and connects to $TMPDIR/<name>, then cleans up. <name> may
+# contain slashes (playwright-cli nests its sockets), so make the parents first.
 BIND_PROBE = """
 import os, socket, sys, tempfile
 p = os.path.join(tempfile.gettempdir(), sys.argv[1])
+os.makedirs(os.path.dirname(p), exist_ok=True)
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 try:
     s.bind(p)
@@ -77,19 +80,40 @@ def test_fragment_covers_go_plugin_sockets(sc):
     assert os.path.realpath(tempfile.gettempdir()) not in frag, frag
 
 
+def test_fragment_covers_playwright_cli_sockets(sc):
+    """playwright-cli nests its daemon socket two levels deep:
+    $TMPDIR/playwright-cli/<workspace-hash>/<session>.sock, plus a devtools
+    singleton one level up. Both must match."""
+    pattern = _fragment_pattern(sc.temp_unix_socket_profile_text())
+    t = "/var/folders/ab/cd/T/"
+    assert re.match(pattern, t + "playwright-cli/580d24efa5f32930/default.sock")
+    assert re.match(pattern, t + "playwright-cli/580d24efa5f32930/my-session.sock")
+    assert re.match(pattern, t + "playwright-cli/devtools.sock")
+    # Still scoped: a .sock elsewhere in the temp dir is not covered by this entry.
+    assert not re.match(pattern, t + "vscode-ipc-1234.sock")
+    assert not re.match(pattern, t + "playwright-cli/a/b/c/default.sock")
+
+
 def test_fragment_is_name_scoped_not_whole_temp_dir(sc):
     """A blanket temp-dir allow would override safehouse's deliberate denies on
     vscode-git-*.sock / vscode-ipc-*.sock (Seatbelt: last match wins)."""
     frag = sc.temp_unix_socket_profile_text(["plugin[0-9]+"])
     assert "vscode" not in frag
-    # Anchored on the basename, so unlisted names in the same dir stay denied.
+    # Anchored on the socket name, so unlisted names in the same dir stay denied.
     assert r"(plugin[0-9]+)$" in frag, frag
 
 
 def test_fragment_is_data_driven(sc):
     frag = sc.temp_unix_socket_profile_text(["aaa[0-9]+", "bbb"])
     assert "(aaa[0-9]+|bbb)" in frag, frag
-    assert "plugin" not in frag, "basenames must come from the list, not be hardcoded"
+    assert "plugin" not in frag, "socket names must come from the list, not be hardcoded"
+
+
+def _fragment_pattern(frag: str) -> str:
+    """The path-regex out of the rendered fragment, as a Python regex."""
+    m = re.search(r'path-regex #"([^"]+)"', frag)
+    assert m, frag
+    return m.group(1)
 
 
 def test_write_profile_writes_stable_file(sc, tmp_dir: str):
@@ -151,9 +175,9 @@ def _policy(append: str | None) -> str:
     return str(path)
 
 
-def _probe(policy: str, basename: str) -> str:
+def _probe(policy: str, name: str) -> str:
     r = subprocess.run(
-        ["sandbox-exec", "-f", policy, "/usr/bin/python3", "-c", BIND_PROBE, basename],
+        ["sandbox-exec", "-f", policy, "/usr/bin/python3", "-c", BIND_PROBE, name],
         capture_output=True, text=True,
     )
     return (r.stdout + r.stderr).strip()
@@ -172,6 +196,13 @@ def test_e2e_bind_allowed_with_fragment(sc, tmp_dir: str) -> None:
     assert "BIND_OK" in out, out
 
 
+def test_e2e_playwright_socket_allowed_with_fragment(sc, tmp_dir: str) -> None:
+    frag = Path(tmp_dir) / "sc-temp-unix-sockets.sb"
+    frag.write_text(sc.temp_unix_socket_profile_text())
+    out = _probe(_policy(str(frag)), f"playwright-cli/sc{os.getpid()}/default.sock")
+    assert "BIND_OK" in out, out
+
+
 def test_e2e_unlisted_socket_name_stays_denied(sc, tmp_dir: str) -> None:
     frag = Path(tmp_dir) / "sc-temp-unix-sockets.sb"
     frag.write_text(sc.temp_unix_socket_profile_text())
@@ -184,6 +215,7 @@ def main() -> None:
         sc = load_sc(profile_dir)
         test_fragment_allows_both_directions(sc)
         test_fragment_covers_go_plugin_sockets(sc)
+        test_fragment_covers_playwright_cli_sockets(sc)
         test_fragment_is_name_scoped_not_whole_temp_dir(sc)
         test_fragment_is_data_driven(sc)
         test_write_profile_writes_stable_file(sc, tmp_dir)
@@ -198,6 +230,7 @@ def main() -> None:
         else:
             test_e2e_bind_denied_without_fragment()
             test_e2e_bind_allowed_with_fragment(sc, tmp_dir)
+            test_e2e_playwright_socket_allowed_with_fragment(sc, tmp_dir)
             test_e2e_unlisted_socket_name_stays_denied(sc, tmp_dir)
             print("end-to-end sandbox checks passed")
     print("OK")
