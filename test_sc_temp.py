@@ -169,15 +169,23 @@ def test_profile_env_pass(sc):
 
 
 def test_profile_dirs_expands_env_vars(sc, tmp):
+    """$VARS expand, and the result is a realpath — mounting a link path alone
+    leaves the target unreachable inside the sandbox."""
     target = tmp / "notes"
     target.mkdir()
     os.environ["SC_TEST_NOTES_DIR"] = str(target)
     try:
         ro, rw = sc.profile_dirs({"dirs": {"rw": ["$SC_TEST_NOTES_DIR"]}})
-        assert rw == [str(target)], rw
+        assert rw == [os.path.realpath(target)], rw
         assert ro == [], ro
     finally:
         del os.environ["SC_TEST_NOTES_DIR"]
+
+    link = tmp / "notes-link"
+    if not link.exists():
+        link.symlink_to(target)
+    _, rw = sc.profile_dirs({"dirs": {"rw": [str(link)]}})
+    assert rw == [os.path.realpath(target)], rw
 
 
 def main() -> None:

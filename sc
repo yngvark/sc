@@ -230,17 +230,19 @@ def load_profile(name: str) -> dict:
 
 
 def resolve_dirs(paths: list, source: str) -> list[str]:
-    """Existing absolute paths from PATHS, with $VARS and ~ expanded. A path that
-    does not exist is dropped with a warning naming SOURCE: safehouse rejects a
-    missing --add-dirs entry, so one stale line in config would otherwise block
-    every launch."""
+    """Existing real paths from PATHS, with $VARS and ~ expanded and symlinks
+    resolved — mounting a link path alone leaves the contents inaccessible
+    inside the sandbox (same reason PROFILE_DIR is mounted resolved). A path
+    that does not exist is dropped with a warning naming SOURCE: safehouse
+    rejects a missing --add-dirs entry, so one stale line in config would
+    otherwise block every launch."""
     out: list[str] = []
     for p in paths:
         expanded = Path(os.path.expandvars(str(p))).expanduser()
         if not expanded.exists():
             err(f"{source} dir missing, skipping: {p}")
             continue
-        out.append(str(expanded))
+        out.append(os.path.realpath(expanded))
     return out
 
 
@@ -266,35 +268,45 @@ def load_config() -> dict:
         fail(f"Error: could not read {CONFIG_FILE}: {e}")
 
 
-def dir_covers(key: str, path: str) -> bool:
-    """True if PATH is KEY or lives under it. Both sides are expanded and
+def dir_covers(member: str, path: str) -> bool:
+    """True if PATH is MEMBER or lives under it. Both sides are expanded and
     realpath'd first: safehouse resolves --add-dirs to realpaths and Seatbelt
     matches the resolved path of the file being opened, so comparing link paths
     would silently miss (same lesson as PROFILE_DIR.resolve() below)."""
-    k = os.path.realpath(Path(os.path.expandvars(key)).expanduser())
+    m = os.path.realpath(Path(os.path.expandvars(member)).expanduser())
     p = os.path.realpath(path)
-    return p == k or p.startswith(k.rstrip(os.sep) + os.sep)
+    return p == m or p.startswith(m.rstrip(os.sep) + os.sep)
 
 
 def config_dirs_for(config: dict, cwd: str) -> tuple[list[str], list[str]]:
     """The (ro, rw) dirs the global config grants for a launch in CWD.
 
-    [when."<dir>"] entries with ro/rw lists; an entry applies when CWD is that
-    dir or anywhere below it, so a key can be one repo or the parent of all of
-    them. Every matching entry contributes — grants union, they do not override.
-    No recursion: a granted dir's own [when] entry is not pulled in."""
+    [group.<name>] holds one ro or rw list: a set of dirs that belong together.
+    Launching in any member — or anywhere below it — mounts every member of that
+    group, so the relation is symmetric and needs stating once. A group has a
+    single access level; ro and rw in one group is an error. Every activated
+    group contributes: grants union, they do not override. No transitive
+    closure — two groups sharing a member do not chain, so what a launch gets is
+    readable straight off the file."""
     ro: list[str] = []
     rw: list[str] = []
-    for key, spec in sorted((config.get("when") or {}).items()):
-        if not isinstance(spec, dict) or not dir_covers(key, cwd):
+    for name, spec in sorted((config.get("group") or {}).items()):
+        if not isinstance(spec, dict):
             continue
-        entry_ro = resolve_dirs(spec.get("ro") or [], f"Config [when.\"{key}\"]")
-        entry_rw = resolve_dirs(spec.get("rw") or [], f"Config [when.\"{key}\"]")
-        for paths, access in ((entry_ro, "ro"), (entry_rw, "rw")):
-            if paths:
-                err(f"Dirs: {key} -> {', '.join(compress_home(p) for p in paths)} ({access})")
-        ro += entry_ro
-        rw += entry_rw
+        members_ro = spec.get("ro") or []
+        members_rw = spec.get("rw") or []
+        if members_ro and members_rw:
+            fail(f"Error: [group.{name}] in {CONFIG_FILE} has both ro and rw; "
+                 "a group is one set of dirs at one access level — split it in two")
+        access = "ro" if members_ro else "rw"
+        members = members_ro or members_rw
+        if not any(dir_covers(str(m), cwd) for m in members):
+            continue
+        paths = resolve_dirs(members, f"Config [group.{name}]")
+        if not paths:
+            continue
+        err(f"Dirs: {name} -> {', '.join(compress_home(p) for p in paths)} ({access})")
+        (ro if access == "ro" else rw).extend(paths)
     return ro, rw
 
 
@@ -602,7 +614,7 @@ Options:
   -dr  PATH            safehouse --add-dirs-ro=PATH (read-only). Repeatable.
   -dw  PATH            safehouse --add-dirs=PATH    (read/write). Repeatable.
                        One-off grants. For dirs you want every time you work
-                       somewhere, use [when] in config.toml below instead — the
+                       somewhere, use [group] in config.toml below instead — the
                        sandbox cannot be widened once a session is running, so a
                        forgotten -dw costs a relaunch.
   -H, --history        fzf-pick a previous launch (dir + args) and re-run it
@@ -635,15 +647,16 @@ Profile file (~/.config/sc/profiles/<name>.toml):
                                 safehouse --env-pass, e.g. ["OBSIDIAN_NOTES_DIR"].
 
 Config file (~/.config/sc/config.toml), applies to every launch, any profile:
-  [when."<dir>"] ro, rw         Dirs to mount whenever sc is launched in <dir>
-                                or anywhere below it. Keys can be broad (all
-                                repos) or narrow (one repo); every matching
-                                entry contributes. ~ and $VARS are expanded.
+  [group.<name>] ro or rw       A set of dirs that belong together. Launching
+                                in any of them — or anywhere below one — mounts
+                                all of them, at that one access level. Every
+                                activated group contributes; grants union.
+                                ~ and $VARS are expanded.
 
-    [when."~/src"]
+    [group.repos]
     ro = ["~/src"]                       # every repo, read-only, always
-    [when."~/src/myproject"]
-    rw = ["~/scratch"]                   # only when working in myproject
+    [group.myproject]
+    rw = ["~/src/myproject", "~/scratch"]  # in either one, get both
 """
 
 
@@ -814,8 +827,8 @@ def main() -> None:
         err("Profile: (none)")
 
     profile_ro, profile_rw = profile_dirs(profile)
-    # Per-launch-dir grants from the global config, keyed on where sc was invoked
-    # (before -r/-t moved us): "when I work in here, also share those".
+    # Dir groups from the global config, matched against where sc was invoked
+    # (before -r/-t moved us): "I am in one of these, give me all of them".
     config_ro, config_rw = config_dirs_for(load_config(), invocation_cwd)
 
     default_ro_dirs = [
