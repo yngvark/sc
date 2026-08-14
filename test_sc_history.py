@@ -75,9 +75,9 @@ def test_truncation(sc, tmp):
 
 def test_home_compression_and_display(sc):
     home = os.path.expanduser("~")
-    compressed = sc.compress_home(os.path.join(home, "yk", "git"))
-    assert compressed == "~/yk/git", compressed
-    assert sc.expand_home(compressed) == os.path.join(home, "yk", "git")
+    compressed = sc.compress_home(os.path.join(home, "src", "proj"))
+    assert compressed == "~/src/proj", compressed
+    assert sc.expand_home(compressed) == os.path.join(home, "src", "proj")
     assert sc.compress_home("/tmp/outside") == "/tmp/outside"
     assert sc.history_display({"dir": "~/x", "args": []}).endswith("(no flags)")
     assert "-dr /tmp/bar" in sc.history_display({"dir": "~/x", "args": ["-dr", "/tmp/bar"]})

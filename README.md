@@ -52,14 +52,15 @@ error from whatever the agent was doing inside the sandbox. An unset
 ```
 ~/.config/sc/
 ├── safe-claude.py       → dotfiles symlink (uv-run Python wrapper)
+├── config.toml          → per-launch-dir mount grants ([when] sections)
 ├── profiles/            → *.toml profiles (GitHub token + extra mount dirs)
 ├── active-profile       (state) persisted profile choice from fzf
 ├── history.jsonl        (state) recorded launches for `sc -H`
 └── old/                 archived hand-rolled agent.sb + run-sandboxed.sh
 ```
 
-`~/.config/sc` is a dotfiles symlink into Tresorit, so profiles, the
-persisted profile choice, and history sync across machines.
+`~/.config/sc` is a dotfiles symlink into Tresorit, so `config.toml`, profiles,
+the persisted profile choice, and history sync across machines.
 
 ## Shell entry points
 
@@ -87,6 +88,7 @@ sc -t                         # fresh mktemp -d, cd into it, mount it rw, run th
 sc -dr  /repos/refs           # safehouse --add-dirs-ro=/repos/refs
 sc -dw  /tmp/scratch          # safehouse --add-dirs=/tmp/scratch
 sc -dr A -dr B                # repeatable; safehouse joins with ':'
+                              # (recurring dirs belong in config.toml [when], below)
 sc -H                         # fzf-pick a previous launch, re-run it there
 sc --history                  # same as -H
 sc --warm-token               # resolve/cache the profile token, then exit
@@ -119,6 +121,36 @@ safe --workdir=/tmp/scratch -- bash
 
 See `safehouse --help` for the full set of flags
 (`--enable=...`, `--workdir`, `--trust-workdir-config`, `--append-profile`, …).
+
+## Per-directory mount grants (`config.toml`)
+
+The sandbox policy is fixed when a session starts and can never be widened, so a
+directory you forgot to pass with `-dw` costs a full relaunch. `config.toml`
+removes the flag from the loop: declare once which dirs a working directory needs,
+and every launch there has them.
+
+`~/.config/sc/config.toml`:
+
+```toml
+[when."~/src"]
+ro = ["~/src"]                       # every repo, read-only, always
+
+[when."~/src/myproject"]
+rw = ["~/scratch", "~/notes"]        # only when working in myproject
+```
+
+```
+$ cd ~/src/myproject/docs && sc
+Dirs: ~/src -> ~/src (ro)
+Dirs: ~/src/myproject -> ~/scratch, ~/notes (rw)
+```
+
+A `[when."<dir>"]` entry applies when `sc` is launched in `<dir>` or anywhere
+below it, so keys can be broad (the parent of all repos) or narrow (one repo).
+Every matching entry contributes; grants union. `ro`/`rw` mean the same thing as
+`-dr`/`-dw`, `~` and `$VARS` expand, and missing dirs are skipped with a warning.
+Unlike profile `[dirs]`, this file applies to every launch regardless of profile,
+including `-P`. See `docs/per-dir-grants.md`.
 
 ## Profile files
 

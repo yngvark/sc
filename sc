@@ -34,6 +34,7 @@ PROFILE_DIR = Path(os.environ.get("PROFILE_DIR", str(Path.home() / ".config/sc")
 PROFILES_DIR = Path(os.environ.get("SAFE_CLAUDE_PROFILES_DIR", str(PROFILE_DIR / "profiles")))
 PROFILE_FILE = PROFILE_DIR / "active-profile"
 HISTORY_FILE = PROFILE_DIR / "history.jsonl"
+CONFIG_FILE = PROFILE_DIR / "config.toml"
 HISTORY_MAX = 100
 SAFEHOUSE = os.environ.get("SAFEHOUSE_BIN", "safehouse")
 
@@ -228,20 +229,73 @@ def load_profile(name: str) -> dict:
         return tomllib.load(f)
 
 
+def resolve_dirs(paths: list, source: str) -> list[str]:
+    """Existing absolute paths from PATHS, with $VARS and ~ expanded. A path that
+    does not exist is dropped with a warning naming SOURCE: safehouse rejects a
+    missing --add-dirs entry, so one stale line in config would otherwise block
+    every launch."""
+    out: list[str] = []
+    for p in paths:
+        expanded = Path(os.path.expandvars(str(p))).expanduser()
+        if not expanded.exists():
+            err(f"{source} dir missing, skipping: {p}")
+            continue
+        out.append(str(expanded))
+    return out
+
+
 def profile_dirs(profile: dict) -> tuple[list[str], list[str]]:
     """Return (ro, rw) lists of existing absolute paths from profile [dirs] section."""
-    def resolve(paths: list[str]) -> list[str]:
-        out: list[str] = []
-        for p in paths:
-            expanded = Path(os.path.expandvars(p)).expanduser()
-            if not expanded.exists():
-                err(f"Profile dir missing, skipping: {p}")
-                continue
-            out.append(str(expanded))
-        return out
-
     dirs = profile.get("dirs") or {}
-    return resolve(dirs.get("ro") or []), resolve(dirs.get("rw") or [])
+    return (
+        resolve_dirs(dirs.get("ro") or [], "Profile"),
+        resolve_dirs(dirs.get("rw") or [], "Profile"),
+    )
+
+
+def load_config() -> dict:
+    """The parsed global config (CONFIG_FILE), {} when there is none. A malformed
+    file aborts rather than launching without its grants: a silently narrower
+    sandbox surfaces much later as an unrelated `Operation not permitted`."""
+    if not CONFIG_FILE.is_file():
+        return {}
+    try:
+        with CONFIG_FILE.open("rb") as f:
+            return tomllib.load(f)
+    except (tomllib.TOMLDecodeError, OSError) as e:
+        fail(f"Error: could not read {CONFIG_FILE}: {e}")
+
+
+def dir_covers(key: str, path: str) -> bool:
+    """True if PATH is KEY or lives under it. Both sides are expanded and
+    realpath'd first: safehouse resolves --add-dirs to realpaths and Seatbelt
+    matches the resolved path of the file being opened, so comparing link paths
+    would silently miss (same lesson as PROFILE_DIR.resolve() below)."""
+    k = os.path.realpath(Path(os.path.expandvars(key)).expanduser())
+    p = os.path.realpath(path)
+    return p == k or p.startswith(k.rstrip(os.sep) + os.sep)
+
+
+def config_dirs_for(config: dict, cwd: str) -> tuple[list[str], list[str]]:
+    """The (ro, rw) dirs the global config grants for a launch in CWD.
+
+    [when."<dir>"] entries with ro/rw lists; an entry applies when CWD is that
+    dir or anywhere below it, so a key can be one repo or the parent of all of
+    them. Every matching entry contributes — grants union, they do not override.
+    No recursion: a granted dir's own [when] entry is not pulled in."""
+    ro: list[str] = []
+    rw: list[str] = []
+    for key, spec in sorted((config.get("when") or {}).items()):
+        if not isinstance(spec, dict) or not dir_covers(key, cwd):
+            continue
+        entry_ro = resolve_dirs(spec.get("ro") or [], f"Config [when.\"{key}\"]")
+        entry_rw = resolve_dirs(spec.get("rw") or [], f"Config [when.\"{key}\"]")
+        for paths, access in ((entry_ro, "ro"), (entry_rw, "rw")):
+            if paths:
+                err(f"Dirs: {key} -> {', '.join(compress_home(p) for p in paths)} ({access})")
+        ro += entry_ro
+        rw += entry_rw
+    return ro, rw
 
 
 def profile_env_pass(profile: dict) -> list[str]:
@@ -547,6 +601,10 @@ Options:
                        way; this only changes claude's starting directory.
   -dr  PATH            safehouse --add-dirs-ro=PATH (read-only). Repeatable.
   -dw  PATH            safehouse --add-dirs=PATH    (read/write). Repeatable.
+                       One-off grants. For dirs you want every time you work
+                       somewhere, use [when] in config.toml below instead — the
+                       sandbox cannot be widened once a session is running, so a
+                       forgotten -dw costs a relaunch.
   -H, --history        fzf-pick a previous launch (dir + args) and re-run it
                        in that directory. History is recorded automatically
                        on every launch to ~/.config/sc/history.jsonl, which
@@ -575,6 +633,17 @@ Profile file (~/.config/sc/profiles/<name>.toml):
                                 expanded, e.g. rw = ["$OBSIDIAN_NOTES_DIR"].
   [env] pass                    Env var names to forward into the sandbox via
                                 safehouse --env-pass, e.g. ["OBSIDIAN_NOTES_DIR"].
+
+Config file (~/.config/sc/config.toml), applies to every launch, any profile:
+  [when."<dir>"] ro, rw         Dirs to mount whenever sc is launched in <dir>
+                                or anywhere below it. Keys can be broad (all
+                                repos) or narrow (one repo); every matching
+                                entry contributes. ~ and $VARS are expanded.
+
+    [when."~/src"]
+    ro = ["~/src"]                       # every repo, read-only, always
+    [when."~/src/myproject"]
+    rw = ["~/scratch"]                   # only when working in myproject
 """
 
 
@@ -745,6 +814,9 @@ def main() -> None:
         err("Profile: (none)")
 
     profile_ro, profile_rw = profile_dirs(profile)
+    # Per-launch-dir grants from the global config, keyed on where sc was invoked
+    # (before -r/-t moved us): "when I work in here, also share those".
+    config_ro, config_rw = config_dirs_for(load_config(), invocation_cwd)
 
     default_ro_dirs = [
         str(Path("~/.gitconfig").expanduser()),
@@ -756,7 +828,7 @@ def main() -> None:
     # it read-only so claude can read codex config/auth without writing to it.
     if not codex:
         default_ro_dirs.append(str(Path("~/.codex").expanduser()))
-    ro_dirs = profile_ro + default_ro_dirs + ro_dirs
+    ro_dirs = profile_ro + config_ro + default_ro_dirs + ro_dirs
 
     default_rw_dirs = [
         agent_cfg,
@@ -786,7 +858,7 @@ def main() -> None:
             err(f"Repo: cd into {repo_root}")
     elif repo_root_flag:
         fail("Error: --repo-root used outside a git repo")
-    rw_dirs = profile_rw + default_rw_dirs + rw_dirs
+    rw_dirs = profile_rw + config_rw + default_rw_dirs + rw_dirs
 
     if temp_dir:
         rw_dirs.append(temp_dir)
