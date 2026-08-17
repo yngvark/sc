@@ -611,8 +611,9 @@ Options:
                        ~/.claude/.credentials.json).
   -y                   Pass the agent's "skip all prompts" flag
                        (claude: --dangerously-skip-permissions; see --codex).
-  -m, --mode MODE      Pass `--permission-mode MODE` to claude, e.g.
-                       `sc -m auto`. The value is not validated here — claude
+  -m, --mode [MODE]    Pass `--permission-mode MODE` to claude. With no value,
+                       MODE defaults to `auto`, so `sc -m` == `sc -m auto`.
+                       The value is not validated here — claude
                        rejects an unknown mode and lists the valid ones.
                        Overrides permissions.defaultMode in settings.json for
                        this launch. Mutually exclusive with -y, and claude-only
@@ -729,10 +730,13 @@ def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool
             yes = True
             i += 1
         elif a in ("-m", "--mode"):
-            if i + 1 >= len(argv):
-                fail(f"Error: {a} requires a mode argument (e.g. `sc {a} auto`)")
-            mode = argv[i + 1]
-            i += 2
+            nxt = argv[i + 1] if i + 1 < len(argv) else ""
+            if nxt and not nxt.startswith("-") and nxt != "--":
+                mode = nxt
+                i += 2
+            else:
+                mode = "auto"
+                i += 1
         elif a == "--warm-token":
             warm_token = True
             i += 1

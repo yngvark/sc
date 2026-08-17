@@ -7,6 +7,11 @@
 `~/.claude/settings.json` for that one launch, and nothing else about the
 sandbox changes.
 
+The value is optional: a bare `sc -m` means `sc -m auto`, since auto is the
+mode wanted often enough that typing it every time is friction. `-m` followed
+by another flag or `--` still means the bare form — the next token is only
+taken as the mode when it does not start with `-`, the same rule `-p` uses.
+
 ## Why a mode flag and not a `--auto` flag
 
 claude has several permission modes and the set grows over time. A dedicated

@@ -5,8 +5,8 @@
 """Tests for the sc `-m/--mode` flag.
 
 `-m auto` forwards `--permission-mode auto` to claude, overriding
-permissions.defaultMode in settings.json for that launch. It is claude-only
-and mutually exclusive with -y.
+permissions.defaultMode in settings.json for that launch. A bare `-m` means
+`auto`. It is claude-only and mutually exclusive with -y.
 Run directly: ./test_sc_permission_mode.py
 """
 
@@ -63,8 +63,14 @@ def test_passthrough_stays_last(sc):
     assert parsed[-1] == ["-c"], parsed
 
 
-def test_missing_value_is_rejected(sc):
-    expect_fail(sc, ["-m"], "requires a mode")
+def test_bare_flag_defaults_to_auto(sc):
+    assert sc.parse_args(["-m"])[MODE_IDX] == "auto"
+    assert sc.parse_args(["--mode"])[MODE_IDX] == "auto"
+    # A following flag or `--` is not swallowed as the mode value.
+    assert sc.parse_args(["-m", "-a"])[MODE_IDX] == "auto"
+    parsed = sc.parse_args(["-m", "--", "-c"])
+    assert parsed[MODE_IDX] == "auto"
+    assert parsed[-1] == ["-c"], parsed
 
 
 def test_mode_with_yes_is_rejected(sc):
@@ -90,7 +96,7 @@ def main() -> None:
         test_short_and_long_flag(sc)
         test_value_is_not_validated(sc)
         test_passthrough_stays_last(sc)
-        test_missing_value_is_rejected(sc)
+        test_bare_flag_defaults_to_auto(sc)
         test_mode_with_yes_is_rejected(sc)
         test_mode_with_codex_is_rejected(sc)
         test_permission_flags(sc)

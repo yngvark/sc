@@ -82,7 +82,8 @@ sc -P                         # explicitly use no profile (no token, no dirs)
 sc -a                         # mount ~/.aws (rw) and pass AWS_PROFILE (checks login first)
 sc -k                         # allow macOS Keychain access (denied by default)
 sc -y                         # pass the agent's "skip all prompts" flag
-sc -m auto                    # claude --permission-mode auto (also: plan, acceptEdits, ...)
+sc -m                         # claude --permission-mode auto (bare -m == auto)
+sc -m plan                    # any other mode: plan, acceptEdits, ...
 sc --codex                    # run codex instead of claude (mounts ~/.codex rw)
 sc --codex -y                 # codex with --dangerously-bypass-approvals-and-sandbox
 sc -t                         # fresh mktemp -d, cd into it, mount it rw, run there
