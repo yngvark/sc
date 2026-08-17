@@ -355,6 +355,15 @@ def expand_home(path: str) -> str:
     return str(Path(path).expanduser())
 
 
+def permission_flags(yes: bool, mode: str, yolo_flag: str) -> list[str]:
+    """Flags to prepend to the agent's argv for -y / -m. Not used with --shell."""
+    if yes:
+        return [yolo_flag]
+    if mode:
+        return ["--permission-mode", mode]
+    return []
+
+
 def agent_spec(codex: bool) -> tuple[str, str, str]:
     """Return (binary, config_dir, yolo_flag) for the selected agent."""
     if codex:
@@ -602,6 +611,12 @@ Options:
                        ~/.claude/.credentials.json).
   -y                   Pass the agent's "skip all prompts" flag
                        (claude: --dangerously-skip-permissions; see --codex).
+  -m, --mode MODE      Pass `--permission-mode MODE` to claude, e.g.
+                       `sc -m auto`. The value is not validated here — claude
+                       rejects an unknown mode and lists the valid ones.
+                       Overrides permissions.defaultMode in settings.json for
+                       this launch. Mutually exclusive with -y, and claude-only
+                       (codex has no equivalent).
   -t, --temp           Create a fresh temp dir under $TMPDIR/sc, cd into it,
                        mount it read/write, and launch claude there. No repo
                        is auto-shared (the temp dir isn't a git repo). For
@@ -660,8 +675,11 @@ Config file (~/.config/sc/config.toml), applies to every launch, any profile:
 """
 
 
-def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, list[str], list[str], list[str]]:
-    """Return (select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, passthrough)."""
+def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, list[str], list[str], str, list[str]]:
+    """Return (select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, mode, passthrough).
+
+    passthrough stays last so tests (and callers) can rely on [-1].
+    """
     select_profile = False
     profile_name = ""
     no_profile = False
@@ -677,6 +695,7 @@ def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool
     ro_dirs: list[str] = []
     rw_dirs: list[str] = []
     passthrough: list[str] = []
+    mode = ""
 
     def take_value(flag: str, idx: int) -> tuple[str, int]:
         if idx + 1 >= len(argv):
@@ -709,6 +728,11 @@ def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool
         elif a == "-y":
             yes = True
             i += 1
+        elif a in ("-m", "--mode"):
+            if i + 1 >= len(argv):
+                fail(f"Error: {a} requires a mode argument (e.g. `sc {a} auto`)")
+            mode = argv[i + 1]
+            i += 2
         elif a == "--warm-token":
             warm_token = True
             i += 1
@@ -738,7 +762,13 @@ def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool
             break
         else:
             fail(f"Error: unknown argument: {a}\nPass arguments to claude after `--` (e.g. `sc -- {a}`).")
-    return select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, passthrough
+
+    if mode and yes:
+        fail("Error: -m/--mode and -y are mutually exclusive (-y already forces a bypass mode).")
+    if mode and codex:
+        fail("Error: -m/--mode is claude-only; codex has no --permission-mode equivalent.")
+
+    return select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, mode, passthrough
 
 
 def resolve_profile(select_profile: bool, profile_name: str, no_profile: bool) -> str | None:
@@ -770,7 +800,7 @@ def resolve_profile(select_profile: bool, profile_name: str, no_profile: bool) -
 
 
 def main() -> None:
-    select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root_flag, shell, ro_dirs, rw_dirs, passthrough = parse_args(sys.argv[1:])
+    select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root_flag, shell, ro_dirs, rw_dirs, mode, passthrough = parse_args(sys.argv[1:])
 
     agent_bin, agent_cfg, yolo_flag = agent_spec(codex)
     if shell:
@@ -804,8 +834,8 @@ def main() -> None:
 
     aws_profile = check_aws_ready() if aws else ""
 
-    if yes and not shell:
-        passthrough.insert(0, yolo_flag)
+    if not shell:
+        passthrough[:0] = permission_flags(yes, mode, yolo_flag)
 
     # Create the temp dir and cd into it before repo detection below, so the
     # git rev-parse runs in the (repo-less) temp dir and shares nothing extra.
