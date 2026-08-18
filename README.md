@@ -166,7 +166,7 @@ token (from 1Password) and a list of extra directories to auto-mount.
 ```toml
 [github]
 token = "op://Vault/Item/field"            # 1Password secret reference
-op_account = "my-team.1password.eu"           # optional, default account if omitted
+op_account = "my-team.1password.eu"         # optional, default account if omitted
 
 [dirs]
 ro = ["~/some/read-only/path"]              # mounted via --add-dirs-ro
