@@ -310,6 +310,61 @@ def config_dirs_for(config: dict, cwd: str) -> tuple[list[str], list[str]]:
     return ro, rw
 
 
+def profile_match_dirs(profile: dict) -> list[str]:
+    """The [match].dirs entries of PROFILE — the directories it applies in."""
+    match = profile.get("match") or {}
+    return [str(d) for d in (match.get("dirs") or [])]
+
+
+def read_profile_file(name: str) -> dict | None:
+    """The parsed profile NAME, or None if it cannot be read. Used when scanning
+    every profile for a [match] — one unreadable file must not stop a launch that
+    has nothing to do with it, so it warns instead of aborting (unlike
+    load_profile(), which is the profile actually being used)."""
+    path = PROFILES_DIR / f"{name}.toml"
+    try:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    except (tomllib.TOMLDecodeError, OSError) as e:
+        err(f"Profile: skipping unreadable {path}: {e}")
+        return None
+
+
+def match_profile_for(cwd: str) -> tuple[str, str] | None:
+    """The (name, matched dir) of the profile whose [match].dirs covers CWD, or
+    None. A dir covers itself and everything below it, so a repo's subdirectories
+    match too.
+
+    The deepest match wins: every member covering CWD is an ancestor of it, so
+    they all sit on one chain and "longest path" is exactly "most specific" —
+    `[match]` in a broad profile (~/src) can be narrowed by a specific one
+    (~/src/work) without either knowing about the other. Two *different* profiles
+    matching at the same depth is a config mistake with no safe resolution — the
+    profile picks the GitHub token — so it aborts and names them."""
+    matches: list[tuple[int, str, str]] = []
+    for name in discover_profiles():
+        profile = read_profile_file(name)
+        if profile is None:
+            continue
+        for member in profile_match_dirs(profile):
+            if not dir_covers(member, cwd):
+                continue
+            resolved = os.path.realpath(Path(os.path.expandvars(member)).expanduser())
+            matches.append((len(resolved.rstrip(os.sep)), name, resolved))
+    if not matches:
+        return None
+    deepest = max(depth for depth, _, _ in matches)
+    finalists = sorted({(name, member) for depth, name, member in matches if depth == deepest})
+    if len({name for name, _ in finalists}) > 1:
+        fail(
+            "Error: several profiles claim this directory at the same depth: "
+            + ", ".join(f"{name} ([match] {compress_home(member)})" for name, member in finalists)
+            + f"\n  {compress_home(os.path.realpath(cwd))} would get an arbitrary GitHub token.\n"
+            "  Make one [match] dir more specific, or pass -p <name> / -P for this launch."
+        )
+    return finalists[0]
+
+
 def profile_env_pass(profile: dict) -> list[str]:
     """Return env var names to forward into the sandbox from [env].pass."""
     env = profile.get("env") or {}
@@ -585,7 +640,10 @@ Options:
                        a list of extra directories to auto-mount. Defined
                        per file at ~/.config/sc/profiles/<name>.toml.
                        Without a name, fzf-pick. Choice is persisted.
+                       Usually unnecessary: a profile with a [match] dirs list
+                       covering the current dir is selected automatically.
   -P, --no-profile     Do not use any profile (no token, no profile dirs).
+                       Also the way to override a [match] for one launch.
   --codex              Run codex instead of claude. Mounts ~/.codex (rw) instead
                        of ~/.claude, and maps -y to codex's
                        --dangerously-bypass-approvals-and-sandbox.
@@ -646,7 +704,8 @@ Options:
                        claude's own help). Unknown args before `--` are
                        rejected.
 
-With no -p/-P, the persisted profile (if any) is used.
+Profile selection, in order: -P, then -p, then the profile whose [match] dirs
+cover the current directory, then the persisted choice from the last -p.
 
 Environment:
   GITHUB_TOKEN_CACHE_TTL    Keychain cache TTL in seconds (default 36000).
@@ -656,6 +715,13 @@ Environment:
   SAFEHOUSE_BIN             Override safehouse binary (default `safehouse` on PATH).
 
 Profile file (~/.config/sc/profiles/<name>.toml):
+  [match] dirs                  Dirs this profile applies in, so no -p is
+                                needed there. A dir covers everything below it;
+                                the deepest match across all profiles wins.
+
+    [match]
+    dirs = ["~/src/work", "~/src/work-sandbox"]
+
   [github] token, op_account   1Password ref for the GitHub token.
   [dirs] ro, rw                 Lists of dirs to mount. Both ~ and $VARS are
                                 expanded, e.g. rw = ["$OBSIDIAN_NOTES_DIR"].
@@ -775,9 +841,16 @@ def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool
     return select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, mode, passthrough
 
 
-def resolve_profile(select_profile: bool, profile_name: str, no_profile: bool) -> str | None:
+def resolve_profile(select_profile: bool, profile_name: str, no_profile: bool, cwd: str) -> tuple[str | None, str]:
+    """The (profile name, where it came from) for this launch, name None for no
+    profile. Order: -P, then -p, then a [match] on CWD, then the persisted choice.
+
+    A directory match beats the persisted profile on purpose: `active-profile`
+    holds whatever the last -p picked, possibly in an unrelated project, and
+    letting that shadow the match would leave the flag exactly as mandatory as
+    before. -p still wins (and persists), -P still opts out."""
     if no_profile:
-        return None
+        return None, "--no-profile"
     if select_profile:
         if profile_name:
             if not (PROFILES_DIR / f"{profile_name}.toml").is_file():
@@ -788,7 +861,7 @@ def resolve_profile(select_profile: bool, profile_name: str, no_profile: bool) -
                 sys.exit(1)
             PROFILE_FILE.parent.mkdir(parents=True, exist_ok=True)
             PROFILE_FILE.write_text(profile_name + "\n")
-            return profile_name
+            return profile_name, "-p"
         profiles = discover_profiles()
         if not profiles:
             fail(f"No profiles found ({PROFILES_DIR}/*.toml)")
@@ -797,10 +870,14 @@ def resolve_profile(select_profile: bool, profile_name: str, no_profile: bool) -
             fail("No profile selected.")
         PROFILE_FILE.parent.mkdir(parents=True, exist_ok=True)
         PROFILE_FILE.write_text(choice + "\n")
-        return choice
+        return choice, "picked"
+    matched = match_profile_for(cwd)
+    if matched is not None:
+        name, member = matched
+        return name, f"matched {compress_home(member)}"
     if PROFILE_FILE.is_file():
-        return PROFILE_FILE.read_text().strip() or None
-    return None
+        return (PROFILE_FILE.read_text().strip() or None), "persisted"
+    return None, ""
 
 
 def main() -> None:
@@ -815,12 +892,15 @@ def main() -> None:
     if history:
         run_history_picker()  # chdir + exec, never returns
 
-    profile_id = resolve_profile(select_profile, profile_name, no_profile)
+    # Matched against the invocation cwd, like the config dir groups: which
+    # project you are in is where you ran sc, not where -r/-t moved it.
+    profile_id, profile_origin = resolve_profile(select_profile, profile_name, no_profile, invocation_cwd)
+    origin_note = f" ({profile_origin})" if profile_origin else ""
 
     if warm_token:
         if not profile_id or profile_id == "none":
             fail("Error: --warm-token requires a profile (use -p to select one)")
-        err(f"Profile: {profile_id}")
+        err(f"Profile: {profile_id}{origin_note}")
         profile = load_profile(profile_id)
         if not (profile.get("github") or {}).get("token"):
             fail(f"Error: profile '{profile_id}' has no [github].token to warm")
@@ -855,10 +935,10 @@ def main() -> None:
 
     profile: dict = {}
     if profile_id and profile_id != "none":
-        err(f"Profile: {profile_id}")
+        err(f"Profile: {profile_id}{origin_note}")
         profile = load_profile(profile_id)
     else:
-        err("Profile: (none)")
+        err(f"Profile: (none){origin_note}")
 
     profile_ro, profile_rw = profile_dirs(profile)
     # Dir groups from the global config, matched against where sc was invoked

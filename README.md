@@ -53,7 +53,7 @@ error from whatever the agent was doing inside the sandbox. An unset
 ~/.config/sc/
 ├── safe-claude.py       → dotfiles symlink (uv-run Python wrapper)
 ├── config.toml          → directory groups to mount ([group] sections)
-├── profiles/            → *.toml profiles (GitHub token + extra mount dirs)
+├── profiles/            → *.toml profiles (GitHub token, mount dirs, [match] dirs)
 ├── active-profile       (state) persisted profile choice from fzf
 ├── history.jsonl        (state) recorded launches for `sc -H`
 └── old/                 archived hand-rolled agent.sb + run-sandboxed.sh
@@ -75,7 +75,7 @@ Defined in `~/.zshrc`:
 ## Usage
 
 ```
-sc                            # claude in sandbox, use persisted profile (if any)
+sc                            # claude in sandbox, profile picked from the cwd
 sc -p                         # fzf-pick a profile, persist
 sc -p <name>                  # use the named profile, persist
 sc -P                         # explicitly use no profile (no token, no dirs)
@@ -164,6 +164,9 @@ token (from 1Password) and a list of extra directories to auto-mount.
 `profiles/<name>.toml`:
 
 ```toml
+[match]
+dirs = ["~/src/work", "~/src/work-sandbox"]  # profile applies here, no -p needed
+
 [github]
 token = "op://Vault/Item/field"            # 1Password secret reference
 op_account = "my-team.1password.eu"         # optional, default account if omitted
@@ -182,13 +185,24 @@ are skipped with a warning. `[env].pass` lists env var names to forward into the
 sandbox via `safehouse --env-pass` — use it alongside a `[dirs]` entry when a
 tool inside the sandbox needs both the directory and the var pointing at it.
 
-Resolution order on `-p <name>` / persisted profile:
+`[match].dirs` lists the directories the profile applies in, so working there
+needs no `-p`. A dir covers everything below it, and across profiles the deepest
+match wins — a broad `~/src` profile is narrowed by a `~/src/work` one. Two
+different profiles matching at the same depth aborts the launch instead of
+guessing which GitHub token to hand over.
+
+Selection order: `-P`, then `-p`, then a `[match]` on the launch dir, then the
+persisted choice from the last `-p`. The match beats the persisted profile
+(otherwise a stale choice from another project keeps `-p` mandatory) and is not
+itself persisted. See `docs/profile-matching.md`.
+
+Token resolution order on `-p <name>` / matched / persisted profile:
 
 1. Look up `claude-docker-github-token` / account `<profile>` in macOS
    Keychain. If present and fresher than `GITHUB_TOKEN_CACHE_TTL`, use it.
 2. Otherwise run `op read <ref> [--account <op_account>]`, cache result.
 
-`-P` skips everything. No `-p` and no persisted profile = no token.
+`-P` skips everything. No profile at all = no token.
 
 Cache key (`claude-docker-github-token`) is shared with the retired
 `claude-docker` tool on purpose — warm cache survived the migration.
