@@ -147,6 +147,11 @@ Dirs: myproject -> ~/src/myproject, ~/scratch, ~/notes (rw)
 Dirs: repos -> ~/src (ro)
 ```
 
+A symlinked entry works under both names: safehouse grants the realpath, and sc
+appends a read-only Seatbelt fragment for the link path so `~/.config/sc` is
+usable inside the sandbox and not only `~/Tresorit/…/sc`. See
+`docs/symlinked-dirs.md`.
+
 A group activates when `sc` is launched in any member or anywhere below one, and
 then mounts every member — the relation is symmetric, so it is stated once rather
 than once per direction. A group has a single access level (`ro` *or* `rw`,

@@ -255,6 +255,13 @@ def profile_dirs(profile: dict) -> tuple[list[str], list[str]]:
     )
 
 
+def profile_named_dirs(profile: dict) -> list[str]:
+    """The [dirs] entries of PROFILE as written, before resolution — the names
+    the sandbox has to keep working (see symlink_read_literals)."""
+    dirs = profile.get("dirs") or {}
+    return [str(p) for p in ((dirs.get("ro") or []) + (dirs.get("rw") or []))]
+
+
 def load_config() -> dict:
     """The parsed global config (CONFIG_FILE), {} when there is none. A malformed
     file aborts rather than launching without its grants: a silently narrower
@@ -290,6 +297,20 @@ def config_dirs_for(config: dict, cwd: str) -> tuple[list[str], list[str]]:
     readable straight off the file."""
     ro: list[str] = []
     rw: list[str] = []
+    for name, access, members in activated_groups(config, cwd):
+        paths = resolve_dirs(members, f"Config [group.{name}]")
+        if not paths:
+            continue
+        err(f"Dirs: {name} -> {', '.join(compress_home(p) for p in paths)} ({access})")
+        (ro if access == "ro" else rw).extend(paths)
+    return ro, rw
+
+
+def activated_groups(config: dict, cwd: str) -> list[tuple[str, str, list[str]]]:
+    """The (name, access, members-as-written) of every [group] a launch in CWD
+    activates. Split out of config_dirs_for() so the members are also available
+    unresolved — symlink_read_literals() needs the names, not the realpaths."""
+    out: list[tuple[str, str, list[str]]] = []
     for name, spec in sorted((config.get("group") or {}).items()):
         if not isinstance(spec, dict):
             continue
@@ -299,15 +320,11 @@ def config_dirs_for(config: dict, cwd: str) -> tuple[list[str], list[str]]:
             fail(f"Error: [group.{name}] in {CONFIG_FILE} has both ro and rw; "
                  "a group is one set of dirs at one access level — split it in two")
         access = "ro" if members_ro else "rw"
-        members = members_ro or members_rw
-        if not any(dir_covers(str(m), cwd) for m in members):
+        members = [str(m) for m in (members_ro or members_rw)]
+        if not any(dir_covers(m, cwd) for m in members):
             continue
-        paths = resolve_dirs(members, f"Config [group.{name}]")
-        if not paths:
-            continue
-        err(f"Dirs: {name} -> {', '.join(compress_home(p) for p in paths)} ({access})")
-        (ro if access == "ro" else rw).extend(paths)
-    return ro, rw
+        out.append((name, access, members))
+    return out
 
 
 def profile_match_dirs(profile: dict) -> list[str]:
@@ -464,6 +481,72 @@ def write_keychain_deny_profile() -> str | None:
         return None
     path = Path(tempfile.gettempdir()) / "sc-deny-keychain.sb"
     path.write_text(keychain_deny_profile_text())
+    return str(path)
+
+
+# safehouse resolves every --add-dirs path to its realpath and emits its
+# "ancestor directory literals" for that *resolved* chain only. Seatbelt checks
+# the path as the process wrote it, so a grant on ~/Tresorit/.../sc leaves
+# ~/.config/sc — a dotfiles symlink pointing at it — denied: the kernel cannot
+# read the link it has to follow. Nothing inside the sandbox can widen the
+# policy afterwards, so the bridge has to be laid at launch.
+#
+# The fragment below mirrors safehouse's own trick: `file-read*` on a `literal`
+# grants readdir on that one directory entry, not recursive access under it.
+# Read only, and never on the resolved target (safehouse already grants that at
+# whatever access level was asked for) — writing *through* the link lands on the
+# target, which carries its own grant.
+def symlinked_names(named_paths: list[str]) -> list[str]:
+    """The entries of NAMED_PATHS that reach their target through a symlink —
+    expanded, but deliberately not resolved. A path that already is its own
+    realpath needs no bridge: safehouse's own grant covers it."""
+    out: list[str] = []
+    for raw in named_paths:
+        try:
+            written = os.path.abspath(Path(os.path.expandvars(str(raw))).expanduser())
+            if not os.path.exists(written) or os.path.realpath(written) == written:
+                continue
+        except OSError:
+            continue
+        if written not in out:
+            out.append(written)
+    return sorted(out)
+
+
+def symlink_read_literals(named_paths: list[str]) -> list[str]:
+    """Path prefixes to allow `file-read*` on so NAMED_PATHS keep working under
+    the names they were written with: every symlinked name plus each of its
+    ancestors, because the kernel walks the whole chain and the symlink may sit
+    anywhere along it."""
+    out: list[str] = []
+    for name in symlinked_names(named_paths):
+        p = Path(name)
+        for prefix in [p, *p.parents]:
+            if str(prefix) not in out:
+                out.append(str(prefix))
+    return sorted(out)
+
+
+def symlink_paths_profile_text(literals: list[str]) -> str:
+    rules = "\n".join(f'    (literal "{p}")' for p in literals)
+    return f''';; sc: keep symlinked grants reachable by the path they were written with.
+;; safehouse grants the realpath; Seatbelt matches the path as written, so the
+;; link and its ancestors need readdir/readlink. Read-only, one dir entry each.
+(allow file-read*
+{rules})
+'''
+
+
+def write_symlink_paths_profile(named_paths: list[str]) -> str | None:
+    """Write the symlink-bridge fragment for safehouse --append-profile and
+    return its path; None off-darwin or when no granted dir is symlinked."""
+    if sys.platform != "darwin":
+        return None
+    literals = symlink_read_literals(named_paths)
+    if not literals:
+        return None
+    path = Path(tempfile.gettempdir()) / "sc-symlink-paths.sb"
+    path.write_text(symlink_paths_profile_text(literals))
     return str(path)
 
 
@@ -943,7 +1026,15 @@ def main() -> None:
     profile_ro, profile_rw = profile_dirs(profile)
     # Dir groups from the global config, matched against where sc was invoked
     # (before -r/-t moved us): "I am in one of these, give me all of them".
-    config_ro, config_rw = config_dirs_for(load_config(), invocation_cwd)
+    config = load_config()
+    config_ro, config_rw = config_dirs_for(config, invocation_cwd)
+
+    # Every dir as it was *written* — profile [dirs], activated groups, -dr/-dw.
+    # The grants above are realpaths; these names are what the sandbox also has
+    # to accept, and a symlink among them needs a bridge (see below).
+    named_dirs = profile_named_dirs(profile) + list(ro_dirs) + list(rw_dirs)
+    for _, _, members in activated_groups(config, invocation_cwd):
+        named_dirs += members
 
     default_ro_dirs = [
         str(Path("~/.gitconfig").expanduser()),
@@ -966,11 +1057,14 @@ def main() -> None:
         str(Path("~/.terraform.d").expanduser()),
     ]
     # sc's own config (profiles, history, persisted profile). PROFILE_DIR is
-    # often a symlink, so mount the resolved real target — mounting the link
-    # path alone leaves the contents inaccessible inside the sandbox.
+    # often a symlink (a dotfiles link into a synced folder), so mount the
+    # resolved real target — mounting the link path alone leaves the contents
+    # inaccessible inside the sandbox. The link path itself is bridged below, so
+    # ~/.config/sc keeps working as a name too.
     try:
         if PROFILE_DIR.exists():
             default_rw_dirs.append(str(PROFILE_DIR.resolve()))
+            named_dirs.append(str(PROFILE_DIR))
     except OSError:
         pass
     repo_root = subprocess.run(
@@ -993,10 +1087,19 @@ def main() -> None:
     if aws:
         rw_dirs.append(str(Path("~/.aws").expanduser()))
 
+    named_dirs += default_ro_dirs + default_rw_dirs
+
     safehouse_args: list[str] = [f"--enable={f}" for f in SAFEHOUSE_FEATURES]
     unix_socket_profile = write_temp_unix_socket_profile()
     if unix_socket_profile:
         safehouse_args.append(f"--append-profile={unix_socket_profile}")
+    # Before the keychain deny below, so that deny stays the last match on the
+    # paths it covers — an appended allow would otherwise override it.
+    symlink_profile = write_symlink_paths_profile(named_dirs)
+    if symlink_profile:
+        safehouse_args.append(f"--append-profile={symlink_profile}")
+        names = ", ".join(compress_home(p) for p in symlinked_names(named_dirs))
+        err(f"Dirs: symlinked paths kept usable by name: {names}")
     if keychain:
         err("Keychain: allowed (--keychain)")
     else:

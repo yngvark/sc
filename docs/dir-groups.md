@@ -23,10 +23,10 @@ grants `-dr`/`-dw` produce, just declared instead of typed.
 ever be narrowed. Three plausible escapes were checked and none work:
 
 - **A symlink into an already-granted dir.** safehouse resolves every
-  `--add-dirs` path to its realpath, and the kernel matches the *resolved* path
-  of the file being opened. `sc` already relies on this in the other direction —
-  it mounts `PROFILE_DIR.resolve()` because granting the link path leaves the
-  contents unreachable.
+  `--add-dirs` path to its realpath, so granting a link path alone leaves the
+  contents unreachable — `sc` mounts `PROFILE_DIR.resolve()` for that reason.
+  (The reverse gap, a granted target being unreachable *by* its link name, is
+  bridged at launch; see `symlinked-dirs.md`.)
 - **Re-entering a wider sandbox from inside.** Nested `sandbox_apply` is denied
   (`sandbox-exec: sandbox_apply: Operation not permitted`), as
   `temp-dir-unix-sockets.md` records.
@@ -95,9 +95,9 @@ obvious. (Launching in `B` activates both groups, so it does get all three.)
 
 **Comparison and grants are on realpaths, after `~`/`$VAR` expansion.** A
 symlinked launch directory matches a real-path member and vice versa, and the
-path handed to safehouse is the resolved one. Seatbelt matches the resolved path
-of the file being opened, so a link path would produce a grant that matches the
-config but not the sandbox — the same lesson as `PROFILE_DIR.resolve()`.
+path handed to safehouse is the resolved one. A member that is a symlink stays
+usable under its own name too: sc bridges the link path separately, since
+Seatbelt checks the path as written. See `symlinked-dirs.md`.
 
 **A missing directory is skipped with a warning, not fatal.** safehouse rejects a
 non-existent `--add-dirs` path, so one stale line would otherwise block every
