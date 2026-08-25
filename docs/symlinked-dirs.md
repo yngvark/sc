@@ -1,5 +1,14 @@
 # Symlinked directories keep working by name
 
+In short: `~/.config/sc` is a symlink. safehouse allowed only its target, so the
+kernel could not read the link, and any path through `~/.config/sc` was denied —
+while the same file under the Tresorit path worked. sc now adds a read-only
+Seatbelt rule (the `sandbox-exec` policy language, appended to safehouse's
+generated policy via `--append-profile`) for the link path and its parents. Both
+names work; access at the target is unchanged.
+
+The rest of this file is why, and what the rule may and may not do.
+
 A granted directory is reachable inside the sandbox both by its real path and by
 the symlink you wrote it as. Dotfiles setups depend on this: `~/.config/sc` is a
 stow link into a synced folder, and it is the name every tool and every agent
