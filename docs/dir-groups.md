@@ -138,5 +138,5 @@ grant is the only gate.
   end-to-end launch against a stub safehouse asserting that entering from either
   member reaches `--add-dirs=`.
 
-`config.toml` is personal, machine-synced config. Agents must print a proposed
-file rather than edit it (see `CLAUDE.md`).
+`config.toml` is personal, machine-synced config. Agents edit it directly when a
+change belongs there (see `CLAUDE.md`).
