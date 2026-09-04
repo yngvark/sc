@@ -15,9 +15,11 @@ before it goes into `sc`.
 Two interaction models are implemented so they can be compared:
 
 browse  Python holds the current directory and each level is a fresh fzf run.
-        ctrl-o descends, ctrl-u goes up, Tab marks, ctrl-a banks the marks and
-        keeps browsing, Enter finishes. Enter on ../ goes up instead, so the
-        reflex key works for the one navigation everyone reaches for.
+        Enter walks: into a subdirectory, up on ../, over to ~ or /. The one
+        row that finishes is ./ — "mount where I am". Tab marks several rows
+        and Enter takes them all; ctrl-a takes them and keeps you browsing, so
+        directories in unrelated trees can go in one selection. ctrl-u goes up
+        when ../ has scrolled out of the list.
 
 live    One fzf whose list follows the path you type. Typing `~/src/mo` lists
         `~/src` and filters it; typing `/opt/` walks off anywhere. Tab marks,
@@ -37,8 +39,8 @@ PARENT = "../"
 JUMPS = ["~", "/"]
 
 BROWSE_HEADER = (
-    "enter: pick   ctrl-o: open   ctrl-u: up   tab: mark   ctrl-a: mark & keep browsing"
-    "\n./ is the directory you are in   enter on ../ goes up"
+    "enter: go there   enter on ./ : take this dir, done"
+    "\ntab: mark   ctrl-a: take the marked, keep browsing   ctrl-u: up"
 )
 LIVE_HEADER = "type a path to go anywhere   tab: mark   enter: pick"
 
@@ -175,27 +177,25 @@ def browse(start: str) -> list[str]:
         count = f" ({len(picked)} selected)" if picked else ""
         prompt = f"{compress_home(current)}{count}> "
         key, rows = run_fzf(
-            browse_entries(current), prompt, BROWSE_HEADER,
-            ["ctrl-o", "ctrl-u", "ctrl-a"],
+            browse_entries(current), prompt, BROWSE_HEADER, ["ctrl-u", "ctrl-a"],
         )
         if key == "abort":
             return []
         if key == "ctrl-u":
             current = os.path.dirname(current) or "/"
             continue
-        if key == "ctrl-o":
-            if rows:
-                current = resolve_row(current, rows[0])
-            continue
         if key == "ctrl-a":
-            add(rows)
+            add([r for r in rows if r != PARENT])
             continue
-        # Plain Enter. On ../ alone it navigates rather than picks, because
-        # pressing enter on a parent row reads as "go there" — to mount the
-        # parent, go up and take ./ instead. Alongside marked rows ../ is
-        # ignored, so a stray mark cannot swallow the selection.
-        if rows == [PARENT]:
-            current = os.path.dirname(current) or "/"
+        # Plain Enter. On a single row it navigates, because enter on a
+        # directory reads as "go there" — ./ is the one row that instead means
+        # "take where I am, done". Several rows can only come from Tab, so
+        # those are a selection; ../ among them is dropped rather than mounted.
+        if len(rows) == 1:
+            if rows[0] == SELF:
+                add(rows)
+                return picked
+            current = resolve_row(current, rows[0])
             continue
         add([r for r in rows if r != PARENT])
         return picked

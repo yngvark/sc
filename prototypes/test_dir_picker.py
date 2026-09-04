@@ -119,12 +119,21 @@ def run_picker(tmp, steps, args):
     return [l for l in proc.stdout.split("\n") if l], proc
 
 
-def test_browse_descends_then_picks(tmp):
+def test_enter_walks_into_a_dir_then_dot_takes_it(tmp):
     root = os.path.join(tmp, "root")
     os.makedirs(os.path.join(root, "src", "monorepo"))
-    out, proc = run_picker(tmp, ["ctrl-o\tsrc/", "\tmonorepo/"], [root])
+    out, proc = run_picker(tmp, ["\tsrc/", "\tmonorepo/", "\t./"], [root])
     assert proc.returncode == 0, proc.stderr
     assert out == [os.path.realpath(os.path.join(root, "src", "monorepo"))], out
+
+
+def test_enter_on_several_marked_rows_takes_them_all(tmp):
+    root = os.path.join(tmp, "root")
+    os.makedirs(os.path.join(root, "a"))
+    os.makedirs(os.path.join(root, "b"))
+    out, proc = run_picker(tmp, ["\ta/\tb/"], [root])
+    assert proc.returncode == 0, proc.stderr
+    assert out == [os.path.realpath(os.path.join(root, p)) for p in ("a", "b")], out
 
 
 def test_browse_banks_marks_across_levels(tmp):
@@ -133,14 +142,24 @@ def test_browse_banks_marks_across_levels(tmp):
     os.makedirs(os.path.join(root, "b"))
     out, proc = run_picker(
         tmp,
-        ["ctrl-a\ta/\tb/",     # mark two here, keep browsing
-         "ctrl-o\ta/",         # descend into a
-         "\tdeep/"],           # pick deep, finish
+        ["ctrl-a\ta/\tb/",     # take two here, keep browsing
+         "\ta/",               # enter walks into a
+         "\tdeep/",            # and on into deep
+         "\t./"],              # take it, finish
         [root],
     )
     assert proc.returncode == 0, proc.stderr
     assert out == [os.path.realpath(os.path.join(root, p))
                    for p in ("a", "b", "a/deep")], out
+
+
+def test_ctrl_a_on_a_single_row_takes_it_without_walking_in(tmp):
+    """The escape hatch for picking one subdirectory: enter would walk into it."""
+    root = os.path.join(tmp, "root")
+    os.makedirs(os.path.join(root, "a"))
+    out, proc = run_picker(tmp, ["ctrl-a\ta/", "\t./"], [root])
+    assert proc.returncode == 0, proc.stderr
+    assert out == [os.path.realpath(os.path.join(root, p)) for p in ("a", "")], out
 
 
 def test_browse_up_then_picks_the_dir_it_landed_in(tmp):
@@ -151,7 +170,7 @@ def test_browse_up_then_picks_the_dir_it_landed_in(tmp):
     assert out == [os.path.realpath(os.path.join(root, "a"))], out
 
 
-def test_enter_on_parent_goes_up_instead_of_picking_it(tmp):
+def test_enter_on_parent_goes_up(tmp):
     root = os.path.join(tmp, "root")
     os.makedirs(os.path.join(root, "a", "deep"))
     out, proc = run_picker(tmp, ["\t../", "\t./"], [os.path.join(root, "a", "deep")])
@@ -159,7 +178,7 @@ def test_enter_on_parent_goes_up_instead_of_picking_it(tmp):
     assert out == [os.path.realpath(os.path.join(root, "a"))], out
 
 
-def test_enter_on_parent_alongside_marks_ignores_the_parent(tmp):
+def test_parent_marked_alongside_others_is_never_mounted(tmp):
     root = os.path.join(tmp, "root")
     os.makedirs(os.path.join(root, "a"))
     os.makedirs(os.path.join(root, "b"))
@@ -187,10 +206,13 @@ def main() -> int:
             test_list_for_query_without_a_slash_stays_at_the_start_dir,
             test_list_for_query_tolerates_nonsense,
             test_list_for_query_compresses_home]
-    e2e = [test_browse_descends_then_picks, test_browse_banks_marks_across_levels,
+    e2e = [test_enter_walks_into_a_dir_then_dot_takes_it,
+           test_enter_on_several_marked_rows_takes_them_all,
+           test_browse_banks_marks_across_levels,
+           test_ctrl_a_on_a_single_row_takes_it_without_walking_in,
            test_browse_up_then_picks_the_dir_it_landed_in,
-           test_enter_on_parent_goes_up_instead_of_picking_it,
-           test_enter_on_parent_alongside_marks_ignores_the_parent,
+           test_enter_on_parent_goes_up,
+           test_parent_marked_alongside_others_is_never_mounted,
            test_picking_nothing_exits_nonzero]
     for t in unit:
         with tempfile.TemporaryDirectory() as tmp:
