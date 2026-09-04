@@ -119,19 +119,27 @@ def run_picker(tmp, steps, args):
     return [l for l in proc.stdout.split("\n") if l], proc
 
 
-def test_enter_walks_into_a_dir_then_dot_takes_it(tmp):
+def test_enter_walks_in_and_ctrl_s_takes_where_it_landed(tmp):
     root = os.path.join(tmp, "root")
     os.makedirs(os.path.join(root, "src", "monorepo"))
-    out, proc = run_picker(tmp, ["\tsrc/", "\tmonorepo/", "\t./"], [root])
+    out, proc = run_picker(tmp, ["\tsrc/", "\tmonorepo/", "ctrl-s\t./"], [root])
     assert proc.returncode == 0, proc.stderr
     assert out == [os.path.realpath(os.path.join(root, "src", "monorepo"))], out
 
 
-def test_enter_on_several_marked_rows_takes_them_all(tmp):
+def test_ctrl_s_takes_the_row_under_the_cursor_without_walking_in(tmp):
+    root = os.path.join(tmp, "root")
+    os.makedirs(os.path.join(root, "a"))
+    out, proc = run_picker(tmp, ["ctrl-s\ta/"], [root])
+    assert proc.returncode == 0, proc.stderr
+    assert out == [os.path.realpath(os.path.join(root, "a"))], out
+
+
+def test_ctrl_s_takes_every_marked_row(tmp):
     root = os.path.join(tmp, "root")
     os.makedirs(os.path.join(root, "a"))
     os.makedirs(os.path.join(root, "b"))
-    out, proc = run_picker(tmp, ["\ta/\tb/"], [root])
+    out, proc = run_picker(tmp, ["ctrl-s\ta/\tb/"], [root])
     assert proc.returncode == 0, proc.stderr
     assert out == [os.path.realpath(os.path.join(root, p)) for p in ("a", "b")], out
 
@@ -145,7 +153,7 @@ def test_browse_banks_marks_across_levels(tmp):
         ["ctrl-a\ta/\tb/",     # take two here, keep browsing
          "\ta/",               # enter walks into a
          "\tdeep/",            # and on into deep
-         "\t./"],              # take it, finish
+         "ctrl-s\t./"],        # take it, done
         [root],
     )
     assert proc.returncode == 0, proc.stderr
@@ -153,19 +161,10 @@ def test_browse_banks_marks_across_levels(tmp):
                    for p in ("a", "b", "a/deep")], out
 
 
-def test_ctrl_a_on_a_single_row_takes_it_without_walking_in(tmp):
-    """The escape hatch for picking one subdirectory: enter would walk into it."""
-    root = os.path.join(tmp, "root")
-    os.makedirs(os.path.join(root, "a"))
-    out, proc = run_picker(tmp, ["ctrl-a\ta/", "\t./"], [root])
-    assert proc.returncode == 0, proc.stderr
-    assert out == [os.path.realpath(os.path.join(root, p)) for p in ("a", "")], out
-
-
 def test_enter_on_parent_goes_up(tmp):
     root = os.path.join(tmp, "root")
     os.makedirs(os.path.join(root, "a", "deep"))
-    out, proc = run_picker(tmp, ["\t../", "\t./"], [os.path.join(root, "a", "deep")])
+    out, proc = run_picker(tmp, ["\t../", "ctrl-s\t./"], [os.path.join(root, "a", "deep")])
     assert proc.returncode == 0, proc.stderr
     assert out == [os.path.realpath(os.path.join(root, "a"))], out
 
@@ -174,15 +173,15 @@ def test_parent_marked_alongside_others_is_never_mounted(tmp):
     root = os.path.join(tmp, "root")
     os.makedirs(os.path.join(root, "a"))
     os.makedirs(os.path.join(root, "b"))
-    out, proc = run_picker(tmp, ["\t../\ta/\tb/"], [root])
+    out, proc = run_picker(tmp, ["ctrl-s\t../\ta/\tb/"], [root])
     assert proc.returncode == 0, proc.stderr
     assert out == [os.path.realpath(os.path.join(root, p)) for p in ("a", "b")], out
 
 
-def test_picking_nothing_exits_nonzero(tmp):
+def test_ctrl_s_with_nothing_taken_exits_nonzero(tmp):
     root = os.path.join(tmp, "root")
     os.makedirs(root)
-    out, proc = run_picker(tmp, ["\t"], [root])
+    out, proc = run_picker(tmp, ["ctrl-s\t"], [root])
     assert proc.returncode == 1, proc.stdout
     assert out == [], out
     assert "nothing selected" in proc.stderr
@@ -198,13 +197,13 @@ def main() -> int:
             test_list_for_query_without_a_slash_stays_at_the_start_dir,
             test_list_for_query_tolerates_nonsense,
             test_list_for_query_compresses_home]
-    e2e = [test_enter_walks_into_a_dir_then_dot_takes_it,
-           test_enter_on_several_marked_rows_takes_them_all,
+    e2e = [test_enter_walks_in_and_ctrl_s_takes_where_it_landed,
+           test_ctrl_s_takes_the_row_under_the_cursor_without_walking_in,
+           test_ctrl_s_takes_every_marked_row,
            test_browse_banks_marks_across_levels,
-           test_ctrl_a_on_a_single_row_takes_it_without_walking_in,
            test_enter_on_parent_goes_up,
            test_parent_marked_alongside_others_is_never_mounted,
-           test_picking_nothing_exits_nonzero]
+           test_ctrl_s_with_nothing_taken_exits_nonzero]
     for t in unit:
         with tempfile.TemporaryDirectory() as tmp:
             t(p, os.path.realpath(tmp))
