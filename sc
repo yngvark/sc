@@ -440,16 +440,30 @@ ENV_BUNDLE_KEYS = {
 # Variables sc itself sets from other flags; a bundle naming one would silently
 # win or lose depending on ordering, so it is rejected instead.
 RESERVED_ENV_VARS = {"GITHUB_TOKEN", "AWS_PROFILE"}
+# What the OS accepts as an environment variable name. os.environ and safehouse
+# both reject anything else, so a bundle key outside this shape aborts the
+# launch up front instead of raising deep in the exec path.
+ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def env_bundle_table(config: dict) -> dict:
+    """The [env] table of CONFIG, holding one table per bundle. Aborts when
+    `env` is something else, e.g. a list of bundle names."""
+    bundles = config.get("env") or {}
+    if not isinstance(bundles, dict):
+        fail(f"Error: env in {CONFIG_FILE} must be a table of bundles, "
+             f"each written as [env.<name>]")
+    return bundles
 
 
 def env_bundle_names(config: dict) -> list[str]:
-    return sorted(name for name, spec in (config.get("env") or {}).items() if isinstance(spec, dict))
+    return sorted(name for name, spec in env_bundle_table(config).items() if isinstance(spec, dict))
 
 
 def env_bundle(config: dict, name: str) -> dict:
     """The [env.NAME] table of CONFIG. Aborts listing the defined bundles when
     NAME is not one, and on a key that is not in ENV_BUNDLE_KEYS."""
-    bundles = config.get("env") or {}
+    bundles = env_bundle_table(config)
     spec = bundles.get(name)
     if not isinstance(spec, dict):
         names = env_bundle_names(config)
@@ -498,12 +512,17 @@ def bundle_op_account(bundle: dict) -> str:
 
 
 def check_bundle_var_names(bundle_vars: dict[str, list[str]]) -> None:
-    """Abort if a variable is named twice across BUNDLE_VARS (bundle name ->
-    every variable it sets, from all three tables) or collides with one sc sets
-    itself. Two definitions of one variable have no right answer."""
+    """Abort if a variable in BUNDLE_VARS (bundle name -> every variable it
+    sets, from all three tables) is not a legal environment variable name, is
+    named twice, or collides with one sc sets itself. Two definitions of one
+    variable have no right answer."""
     owners: dict[str, list[str]] = {}
     for bundle, names in bundle_vars.items():
         for var in names:
+            if not ENV_VAR_NAME_RE.match(var):
+                fail(f"Error: [env.{bundle}] in {CONFIG_FILE} names a variable {var!r}, "
+                     f"which is not a legal environment variable name "
+                     f"(letters, digits and _, not starting with a digit)")
             owners.setdefault(var, []).append(bundle)
     for var, bundles in sorted(owners.items()):
         if var in RESERVED_ENV_VARS:
@@ -526,6 +545,46 @@ def resolve_bundle_secrets(name: str, bundle: dict) -> dict[str, str]:
             cache_secret(ENV_SECRET_SERVICE, f"{name}/{var}", value, label)
         out[var] = value
     return out
+
+
+# Every variable sc hands the sandbox goes through one EnvForwarding, whatever
+# flag or config table asked for it: `-a`, a profile's [env].pass or
+# [github].token, an -e bundle's vars/pass/op. Two sources naming one variable
+# abort, and the values sc resolved itself reach os.environ only once, at the
+# end of the launch.
+class EnvForwarding:
+    """The variables safehouse forwards into the sandbox, and the source that
+    claimed each one."""
+
+    def __init__(self) -> None:
+        self.flags: list[str] = []        # the --env-pass= flags, in claim order
+        self.sources: dict[str, str] = {}  # variable -> what claimed it
+        self.values: dict[str, str] = {}   # the values sc resolved on the host
+
+    def claim(self, var: str, source: str, value: str | None = None, log: str = "") -> None:
+        """Forward VAR, crediting SOURCE (e.g. "[env.datadog.op]") for it. VALUE
+        is what sc resolved, or None to forward whatever the host holds. LOG is
+        the status line for this variable; a secret belongs in it only as its
+        last few characters. Aborts when another source already claimed VAR:
+        one of the two values would win silently while the log announced the
+        other."""
+        owner = self.sources.get(var)
+        if owner is not None:
+            fail(f"Error: {var} is set by both {owner} and {source}; "
+                 f"only one source can decide its value")
+        self.sources[var] = source
+        self.flags.append(f"--env-pass={var}")
+        if value is not None:
+            self.values[var] = value
+        if log:
+            err(log)
+
+    def apply(self) -> None:
+        """Write the resolved values into sc's own environment, which safehouse
+        inherits through execvp. Call this last: until it runs, sc's HOME, PATH
+        and OP_ACCOUNT are still the host's, so a bundle cannot redirect the
+        `op` and `security` lookups that resolve the other variables."""
+        os.environ.update(self.values)
 
 
 def fzf_pick(options: list[str], prompt: str) -> str:
@@ -1278,45 +1337,50 @@ def main() -> None:
     if rw_dirs:
         safehouse_args.append(f"--add-dirs={':'.join(rw_dirs)}")
 
+    forwarding = EnvForwarding()
+
     if aws:
-        safehouse_args.append("--env-pass=AWS_PROFILE")
+        forwarding.claim("AWS_PROFILE", "--aws")
         if aws_profile:
             err(f"AWS: sharing ~/.aws (rw), AWS_PROFILE={aws_profile} (credentials OK)")
         else:
             err("AWS: sharing ~/.aws (rw), AWS_PROFILE unset (set one in the session)")
 
     for var in profile_env_pass(profile):
-        safehouse_args.append(f"--env-pass={var}")
-        err(f"Env: passing {var}={os.environ.get(var, '(unset)')} through")
+        forwarding.claim(var, "profile [env].pass",
+                         log=f"Env: passing {var}={os.environ.get(var, '(unset)')} through")
 
-    # -e bundles: every variable is exported into sc's own environment and
-    # forwarded by name, the same route GITHUB_TOKEN takes below. Secret values
-    # are never printed, only their last characters.
+    # -e bundles, plain values first: a name every bundle and the profile agree
+    # on is settled before the 1Password prompts below.
     for name, b in bundles.items():
-        plain = bundle_env_vars(b, name)
-        for var, value in plain.items():
-            os.environ[var] = value
-            safehouse_args.append(f"--env-pass={var}")
-        if plain:
-            err(f"Env: {name} -> " + ", ".join(f"{k}={v}" for k, v in plain.items()))
+        for var, value in bundle_env_vars(b, name).items():
+            forwarding.claim(var, f"[env.{name}.vars]", value,
+                             log=f"Env: {name} -> {var}={value}")
         for var in bundle_env_pass(b, name):
-            safehouse_args.append(f"--env-pass={var}")
-            err(f"Env: {name} -> passing {var}={os.environ.get(var, '(unset)')} through")
+            forwarding.claim(var, f"[env.{name}].pass",
+                             log=f"Env: {name} -> passing {var}={os.environ.get(var, '(unset)')} through")
+
+    # The secrets: printed as their last characters only, never in full.
+    for name, b in bundles.items():
         for var, value in resolve_bundle_secrets(name, b).items():
-            os.environ[var] = value
-            safehouse_args.append(f"--env-pass={var}")
-            err(f"Env: {name} -> {var} ...{value[-4:]} (1Password)")
+            forwarding.claim(var, f"[env.{name}.op]", value,
+                             log=f"Env: {name} -> {var} ...{value[-4:]} (1Password)")
 
     if profile and (profile.get("github") or {}).get("token"):
         token = get_cached_token(profile_id)
         if token is None:
             token = fetch_token_from_1password(profile_id, profile)
             cache_token(profile_id, token)
-        os.environ["GITHUB_TOKEN"] = token
-        safehouse_args.append("--env-pass=GITHUB_TOKEN")
-        err(f"GitHub token: ...{token[-5:]}")
+        forwarding.claim("GITHUB_TOKEN", "profile [github].token", token,
+                         log=f"GitHub token: ...{token[-5:]}")
+
+    safehouse_args += forwarding.flags
 
     record_launch(sys.argv[1:], cwd=invocation_cwd)
+
+    # Last, so that every `op` and `security` call above ran with the host's
+    # environment rather than one a bundle rewrote (see EnvForwarding.apply).
+    forwarding.apply()
 
     cmd = [safehouse_bin, *safehouse_args, "--", agent_bin, *passthrough]
     err("Launching: " + " ".join([SAFEHOUSE, *safehouse_args, "--", agent_bin, *passthrough]))

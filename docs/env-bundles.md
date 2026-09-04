@@ -21,11 +21,20 @@ sc reads exactly these keys, and any other key aborts the launch as a typo:
 | `pass`       | Names of host variables forwarded unchanged (same meaning as a profile's `[env].pass`).    |
 | `op_account` | The 1Password account for the `op` references. Optional.                                   |
 
-Every variable from `vars`, `op` and `pass` is exported into sc's own environment
-and forwarded with `safehouse --env-pass=<VAR>`. A variable defined twice, across
-tables or across bundles, aborts, and so does one sc manages from another flag
-(`GITHUB_TOKEN`, `AWS_PROFILE`). sc checks all of this before any 1Password
-prompt.
+Every variable from `vars`, `op` and `pass` is forwarded with
+`safehouse --env-pass=<VAR>`. sc writes the values it resolved into its own
+environment as the last step of a launch, after every `op read` and Keychain
+lookup has finished, so a bundle is free to set `HOME`, `PATH` or `OP_ACCOUNT`
+for the sandbox without moving where sc itself looks for credentials.
+
+Each variable gets exactly one owner. Alongside the bundles, the owners are
+`--aws` (`AWS_PROFILE`), a profile's `[env].pass`, and a profile's
+`[github].token` (`GITHUB_TOKEN`). Two owners for one name abort the launch:
+one value would reach the sandbox while the status line announced the other.
+A name used twice across a bundle's tables or across two bundles, and a name sc
+manages from another flag, abort before any 1Password prompt. So does a key that
+is not a legal environment variable name, meaning letters, digits and `_`, not
+starting with a digit.
 
 `op` values are cached in the Keychain under service `sc-env-secret`, account
 `<bundle>/<VAR>`, with the same `GITHUB_TOKEN_CACHE_TTL` as the GitHub token. The
@@ -77,7 +86,10 @@ since the sandbox uses API keys, or put `token_storage: file` in
 
 ## Verification
 
-Unit tests: `./test_sc_env_bundles.py`. End-to-end, from outside a sandbox:
+Unit tests: `./test_sc_env_bundles.py` for the config tables, and
+`./test_sc_env_forwarding.py` for the forwarding table (one owner per variable,
+and `op`/`security` running with the host environment). End-to-end, from outside
+a sandbox:
 
 ```
 sc -P -e datadog -s -- -c 'pup --no-agent auth status; pup --no-agent monitors list --limit 1'

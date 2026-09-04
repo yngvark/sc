@@ -115,6 +115,23 @@ def test_duplicate_and_reserved_names_abort(sc):
     assert "sc manages itself" in msg
 
 
+def test_illegal_var_names_abort(sc):
+    sc.check_bundle_var_names({"a": ["DD_API_KEY", "_x", "X9"]})  # legal names pass
+    for bad in ("A=B", "", "DD API_KEY", "9LIVES", "DD-API-KEY"):
+        msg = exits(sc.check_bundle_var_names, {"datadog": [bad]})
+        assert "[env.datadog]" in msg, msg
+        assert repr(bad) in msg, msg
+        assert "not a legal environment variable name" in msg, msg
+
+
+def test_non_table_env_key_aborts(sc):
+    # `env = ["datadog"]` instead of [env.datadog] tables.
+    msg = exits(sc.env_bundle, {"env": ["datadog"]}, "datadog")
+    assert "must be a table of bundles" in msg
+    msg = exits(sc.env_bundle_names, {"env": ["datadog"]})
+    assert "must be a table of bundles" in msg
+
+
 class FakeSecurity:
     """Stands in for subprocess.run so `security` and `op` never run."""
 
@@ -210,6 +227,8 @@ if __name__ == "__main__":
             test_vars_expand_on_host,
             test_malformed_tables_abort,
             test_duplicate_and_reserved_names_abort,
+            test_illegal_var_names_abort,
+            test_non_table_env_key_aborts,
             test_secret_cache_round_trip,
             test_resolve_bundle_secrets_prefers_cache,
             test_op_read_passes_account,
