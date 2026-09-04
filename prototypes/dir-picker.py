@@ -18,8 +18,7 @@ browse  Python holds the current directory and each level is a fresh fzf run.
         Enter walks: into a subdirectory, up on ../, over to ~ or /. The one
         row that finishes is ./ — "mount where I am". Tab marks several rows
         and Enter takes them all; ctrl-a takes them and keeps you browsing, so
-        directories in unrelated trees can go in one selection. ctrl-u goes up
-        when ../ has scrolled out of the list.
+        directories in unrelated trees can go in one selection.
 
 live    One fzf whose list follows the path you type. Typing `~/src/mo` lists
         `~/src` and filters it; typing `/opt/` walks off anywhere. Tab marks,
@@ -40,7 +39,7 @@ JUMPS = ["~", "/"]
 
 BROWSE_HEADER = (
     "enter: go there   enter on ./ : take this dir, done"
-    "\ntab: mark   ctrl-a: take the marked, keep browsing   ctrl-u: up"
+    "\ntab: mark   ctrl-a: take the marked, keep browsing"
 )
 LIVE_HEADER = "type a path to go anywhere   tab: mark   enter: pick"
 
@@ -177,13 +176,10 @@ def browse(start: str) -> list[str]:
         count = f" ({len(picked)} selected)" if picked else ""
         prompt = f"{compress_home(current)}{count}> "
         key, rows = run_fzf(
-            browse_entries(current), prompt, BROWSE_HEADER, ["ctrl-u", "ctrl-a"],
+            browse_entries(current), prompt, BROWSE_HEADER, ["ctrl-a"],
         )
         if key == "abort":
             return []
-        if key == "ctrl-u":
-            current = os.path.dirname(current) or "/"
-            continue
         if key == "ctrl-a":
             add([r for r in rows if r != PARENT])
             continue

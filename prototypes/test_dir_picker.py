@@ -162,14 +162,6 @@ def test_ctrl_a_on_a_single_row_takes_it_without_walking_in(tmp):
     assert out == [os.path.realpath(os.path.join(root, p)) for p in ("a", "")], out
 
 
-def test_browse_up_then_picks_the_dir_it_landed_in(tmp):
-    root = os.path.join(tmp, "root")
-    os.makedirs(os.path.join(root, "a", "deep"))
-    out, proc = run_picker(tmp, ["ctrl-u\t", "\t./"], [os.path.join(root, "a", "deep")])
-    assert proc.returncode == 0, proc.stderr
-    assert out == [os.path.realpath(os.path.join(root, "a"))], out
-
-
 def test_enter_on_parent_goes_up(tmp):
     root = os.path.join(tmp, "root")
     os.makedirs(os.path.join(root, "a", "deep"))
@@ -210,7 +202,6 @@ def main() -> int:
            test_enter_on_several_marked_rows_takes_them_all,
            test_browse_banks_marks_across_levels,
            test_ctrl_a_on_a_single_row_takes_it_without_walking_in,
-           test_browse_up_then_picks_the_dir_it_landed_in,
            test_enter_on_parent_goes_up,
            test_parent_marked_alongside_others_is_never_mounted,
            test_picking_nothing_exits_nonzero]
