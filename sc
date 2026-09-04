@@ -178,18 +178,26 @@ def discover_profiles() -> list[str]:
     return sorted(p.stem for p in PROFILES_DIR.glob("*.toml") if p.is_file())
 
 
-def get_cached_token(profile: str) -> str | None:
+# Keychain service for secrets an env bundle pulls from 1Password (see
+# ENV_BUNDLE_KEYS); the account is "<bundle>/<VAR>". Distinct from
+# KEYCHAIN_SERVICE so a bundle can never read a profile's GitHub token.
+ENV_SECRET_SERVICE = "sc-env-secret"
+
+
+def cached_secret(service: str, account: str, label: str) -> str | None:
+    """The Keychain-cached value under SERVICE/ACCOUNT if it is fresher than TTL,
+    else None (an expired entry is deleted). LABEL prefixes the status line."""
     if sys.platform != "darwin":
         return None
     try:
         stored = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", profile, "-w"],
+            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
     except subprocess.CalledProcessError:
         return None
-    ts_str, _, token = stored.partition(":")
-    if not ts_str or not token:
+    ts_str, _, value = stored.partition(":")
+    if not ts_str or not value:
         return None
     try:
         ts = int(ts_str)
@@ -198,27 +206,36 @@ def get_cached_token(profile: str) -> str | None:
     age = int(time.time()) - ts
     if age >= TTL:
         subprocess.run(
-            ["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", profile],
+            ["security", "delete-generic-password", "-s", service, "-a", account],
             capture_output=True, check=False,
         )
         return None
     remaining = TTL - age
-    err(f"GitHub token: cached ({remaining // 3600}h{(remaining % 3600) // 60}m remaining)")
-    return token
+    err(f"{label}: cached ({remaining // 3600}h{(remaining % 3600) // 60}m remaining)")
+    return value
 
 
-def cache_token(profile: str, token: str) -> None:
+def cache_secret(service: str, account: str, value: str, label: str) -> None:
+    """Store VALUE under SERVICE/ACCOUNT in the Keychain, timestamped for TTL."""
     if TTL == 0:
         return
     if sys.platform != "darwin":
-        err("GitHub token: caching not supported on this platform")
+        err(f"{label}: caching not supported on this platform")
         return
-    payload = f"{int(time.time())}:{token}"
+    payload = f"{int(time.time())}:{value}"
     rc = subprocess.run(
-        ["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", profile, "-w", payload],
+        ["security", "add-generic-password", "-U", "-s", service, "-a", account, "-w", payload],
         capture_output=True,
     ).returncode
-    err("GitHub token: fetched and cached" if rc == 0 else "GitHub token: caching failed (will retry next run)")
+    err(f"{label}: fetched and cached" if rc == 0 else f"{label}: caching failed (will retry next run)")
+
+
+def get_cached_token(profile: str) -> str | None:
+    return cached_secret(KEYCHAIN_SERVICE, profile, "GitHub token")
+
+
+def cache_token(profile: str, token: str) -> None:
+    cache_secret(KEYCHAIN_SERVICE, profile, token, "GitHub token")
 
 
 def load_profile(name: str) -> dict:
@@ -388,20 +405,127 @@ def profile_env_pass(profile: dict) -> list[str]:
     return [str(v) for v in (env.get("pass") or [])]
 
 
-def fetch_token_from_1password(profile_name: str, profile: dict) -> str:
-    gh = profile.get("github") or {}
-    op_ref = gh.get("token", "")
-    op_account = gh.get("op_account", "")
-    if not op_ref:
-        fail(f"Error: [github].token not set in profile '{profile_name}'")
+def op_read(op_ref: str, op_account: str, what: str) -> str:
+    """The secret at OP_REF via `op read`, in OP_ACCOUNT when given. Aborts naming
+    WHAT (e.g. "GitHub token (profile: jobb)") when op fails or returns nothing."""
     cmd = ["op", "read", op_ref]
     if op_account:
         cmd += ["--account", op_account]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0 or not result.stdout.strip():
         err(result.stderr.strip() or "op read failed")
-        fail(f"Error: Failed to retrieve GitHub token from 1Password (profile: {profile_name})")
+        fail(f"Error: Failed to retrieve {what} from 1Password")
     return result.stdout.strip()
+
+
+def fetch_token_from_1password(profile_name: str, profile: dict) -> str:
+    gh = profile.get("github") or {}
+    op_ref = gh.get("token", "")
+    if not op_ref:
+        fail(f"Error: [github].token not set in profile '{profile_name}'")
+    return op_read(op_ref, gh.get("op_account", ""), f"GitHub token (profile: {profile_name})")
+
+
+# Env bundles: [env.<name>] tables in CONFIG_FILE, activated per launch with
+# `-e <name>`. A bundle is a set of environment variables for a tool inside the
+# sandbox, most often one that would otherwise need the (denied) Keychain, so
+# the credential is resolved on the host instead and handed over as a variable.
+# Inside a bundle only these keys are read; anything else is a typo and aborts.
+ENV_BUNDLE_KEYS = {
+    "vars",        # plain values written in the file; ~ and $VARS expand on the host
+    "op",          # 1Password references (op://...), resolved on the host and cached
+    "pass",        # names of host variables forwarded unchanged
+    "op_account",  # the 1Password account for the op references
+}
+# Variables sc itself sets from other flags; a bundle naming one would silently
+# win or lose depending on ordering, so it is rejected instead.
+RESERVED_ENV_VARS = {"GITHUB_TOKEN", "AWS_PROFILE"}
+
+
+def env_bundle_names(config: dict) -> list[str]:
+    return sorted(name for name, spec in (config.get("env") or {}).items() if isinstance(spec, dict))
+
+
+def env_bundle(config: dict, name: str) -> dict:
+    """The [env.NAME] table of CONFIG. Aborts listing the defined bundles when
+    NAME is not one, and on a key that is not in ENV_BUNDLE_KEYS."""
+    bundles = config.get("env") or {}
+    spec = bundles.get(name)
+    if not isinstance(spec, dict):
+        names = env_bundle_names(config)
+        listed = ", ".join(names) if names else "(none)"
+        fail(f"Error: no [env.{name}] in {CONFIG_FILE}. Defined bundles: {listed}")
+    unknown = sorted(set(spec) - ENV_BUNDLE_KEYS)
+    if unknown:
+        fail(f"Error: [env.{name}] in {CONFIG_FILE} has unknown key(s) {', '.join(unknown)}; "
+             f"allowed: {', '.join(sorted(ENV_BUNDLE_KEYS))}")
+    return spec
+
+
+def _string_table(bundle: dict, name: str, key: str) -> dict[str, str]:
+    table = bundle.get(key) or {}
+    if not isinstance(table, dict) or not all(isinstance(v, str) for v in table.values()):
+        fail(f"Error: [env.{name}.{key}] in {CONFIG_FILE} must map variable names to strings")
+    return {str(k): v for k, v in table.items()}
+
+
+def bundle_env_vars(bundle: dict, name: str) -> dict[str, str]:
+    """[env.NAME.vars] with ~ and $VARS expanded against the host environment."""
+    return {
+        k: os.path.expanduser(os.path.expandvars(v))
+        for k, v in _string_table(bundle, name, "vars").items()
+    }
+
+
+def bundle_env_op(bundle: dict, name: str) -> dict[str, str]:
+    """[env.NAME.op]: variable name -> op:// reference."""
+    refs = _string_table(bundle, name, "op")
+    bad = sorted(k for k, v in refs.items() if not v.startswith("op://"))
+    if bad:
+        fail(f"Error: [env.{name}.op] in {CONFIG_FILE}: {', '.join(bad)} must be op:// references")
+    return refs
+
+
+def bundle_env_pass(bundle: dict, name: str) -> list[str]:
+    names = bundle.get("pass") or []
+    if not isinstance(names, list) or not all(isinstance(v, str) for v in names):
+        fail(f"Error: [env.{name}].pass in {CONFIG_FILE} must be a list of variable names")
+    return list(names)
+
+
+def bundle_op_account(bundle: dict) -> str:
+    return str(bundle.get("op_account") or "")
+
+
+def check_bundle_var_names(bundle_vars: dict[str, list[str]]) -> None:
+    """Abort if a variable is named twice across BUNDLE_VARS (bundle name ->
+    every variable it sets, from all three tables) or collides with one sc sets
+    itself. Two definitions of one variable have no right answer."""
+    owners: dict[str, list[str]] = {}
+    for bundle, names in bundle_vars.items():
+        for var in names:
+            owners.setdefault(var, []).append(bundle)
+    for var, bundles in sorted(owners.items()):
+        if var in RESERVED_ENV_VARS:
+            fail(f"Error: [env.{bundles[0]}] sets {var}, which sc manages itself (see -a and profiles)")
+        if len(bundles) > 1:
+            where = ", ".join(f"[env.{b}]" for b in bundles)
+            fail(f"Error: {var} is defined more than once: {where}")
+
+
+def resolve_bundle_secrets(name: str, bundle: dict) -> dict[str, str]:
+    """The [env.NAME.op] variables with their values, from the Keychain cache
+    when fresh, else from 1Password (and cached). Never logs a value."""
+    account = bundle_op_account(bundle)
+    out: dict[str, str] = {}
+    for var, ref in bundle_env_op(bundle, name).items():
+        label = f"Env: {var}"
+        value = cached_secret(ENV_SECRET_SERVICE, f"{name}/{var}", label)
+        if value is None:
+            value = op_read(ref, account, f"{var} ([env.{name}])")
+            cache_secret(ENV_SECRET_SERVICE, f"{name}/{var}", value, label)
+        out[var] = value
+    return out
 
 
 def fzf_pick(options: list[str], prompt: str) -> str:
@@ -768,6 +892,12 @@ Options:
   -r, --repo-root      cd into the git repo root before launching, instead of
                        the current dir. The repo root is auto-shared rw either
                        way; this only changes claude's starting directory.
+  -e, --env NAME       Hand the sandbox the environment variables of the
+                       [env.NAME] bundle in config.toml (below). Repeatable.
+                       Plain values, 1Password secrets (resolved on the host
+                       and Keychain-cached like the GitHub token) and forwarded
+                       host variables. Independent of the profile, so
+                       `sc -P -e datadog` works.
   -dr  PATH            safehouse --add-dirs-ro=PATH (read-only). Repeatable.
   -dw  PATH            safehouse --add-dirs=PATH    (read/write). Repeatable.
                        One-off grants. For dirs you want every time you work
@@ -778,9 +908,10 @@ Options:
                        in that directory. History is recorded automatically
                        on every launch to ~/.config/sc/history.jsonl, which
                        syncs across machines via the dotfiles symlink.
-  --warm-token         Resolve profile, fetch GitHub token (1Password or
-                       cache), store in Keychain, then exit. Does not launch
-                       claude. Errors if no profile is selected.
+  --warm-token         Fetch the profile's GitHub token and the 1Password
+                       secrets of any -e bundles (or use the cache), store
+                       them in Keychain, then exit. Does not launch claude.
+                       Errors if there is nothing to warm.
   -h, --help           Show this help and exit.
   --                   End wrapper options; remaining args go to claude
                        (e.g. `sc -- -c` to resume, `sc -- --help` for
@@ -822,14 +953,33 @@ Config file (~/.config/sc/config.toml), applies to every launch, any profile:
     ro = ["~/src"]                       # every repo, read-only, always
     [group.myproject]
     rw = ["~/src/myproject", "~/scratch"]  # in either one, get both
+
+  [env.<name>]                  An env bundle, activated with `-e <name>`. Only
+                                the bundle name is free; inside it sc reads:
+    vars                          plain values (~ and $VARS expand on the host)
+    op                            1Password op:// references, resolved on the
+                                  host and Keychain-cached (GITHUB_TOKEN_CACHE_TTL)
+    pass                          names of host variables forwarded unchanged
+    op_account                    the 1Password account for the op references
+
+    [env.datadog]
+    op_account = "my-team.1password.eu"
+    [env.datadog.vars]
+    DD_SITE = "datadoghq.eu"
+    DD_TOKEN_STORAGE = "file"            # pup: skip the (denied) Keychain
+    PUP_CONFIG_DIR = "$TMPDIR/pup"       # pup: a config dir it can write
+    [env.datadog.op]
+    DD_API_KEY = "op://Vault/Datadog/api-key"
+    DD_APP_KEY = "op://Vault/Datadog/app-key"
 """
 
 
-def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, list[str], list[str], str, list[str]]:
-    """Return (select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, mode, passthrough).
+def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, list[str], list[str], str, list[str], list[str]]:
+    """Return (select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, mode, env_bundles, passthrough).
 
     passthrough stays last so tests (and callers) can rely on [-1].
     """
+    env_bundles: list[str] = []
     select_profile = False
     profile_name = ""
     no_profile = False
@@ -910,6 +1060,10 @@ def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool
         elif a == "-dw":
             value, i = take_value(a, i)
             rw_dirs.append(value)
+        elif a in ("-e", "--env"):
+            value, i = take_value(a, i)
+            if value not in env_bundles:
+                env_bundles.append(value)
         elif a == "--":
             passthrough.extend(argv[i + 1:])
             break
@@ -921,7 +1075,7 @@ def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool
     if mode and codex:
         fail("Error: -m/--mode is claude-only; codex has no --permission-mode equivalent.")
 
-    return select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, mode, passthrough
+    return select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root, shell, ro_dirs, rw_dirs, mode, env_bundles, passthrough
 
 
 def resolve_profile(select_profile: bool, profile_name: str, no_profile: bool, cwd: str) -> tuple[str | None, str]:
@@ -964,7 +1118,7 @@ def resolve_profile(select_profile: bool, profile_name: str, no_profile: bool, c
 
 
 def main() -> None:
-    select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root_flag, shell, ro_dirs, rw_dirs, mode, passthrough = parse_args(sys.argv[1:])
+    select_profile, profile_name, no_profile, aws, keychain, yes, warm_token, history, temp, codex, repo_root_flag, shell, ro_dirs, rw_dirs, mode, env_bundle_names_wanted, passthrough = parse_args(sys.argv[1:])
 
     agent_bin, agent_cfg, yolo_flag = agent_spec(codex)
     if shell:
@@ -980,18 +1134,30 @@ def main() -> None:
     profile_id, profile_origin = resolve_profile(select_profile, profile_name, no_profile, invocation_cwd)
     origin_note = f" ({profile_origin})" if profile_origin else ""
 
+    # Bundles are validated up front so a typo in -e or in config.toml stops the
+    # launch before any 1Password prompt.
+    bundles = {name: env_bundle(load_config(), name) for name in env_bundle_names_wanted}
+    check_bundle_var_names({
+        name: list(bundle_env_vars(b, name)) + list(bundle_env_op(b, name)) + bundle_env_pass(b, name)
+        for name, b in bundles.items()
+    })
+
     if warm_token:
-        if not profile_id or profile_id == "none":
-            fail("Error: --warm-token requires a profile (use -p to select one)")
-        err(f"Profile: {profile_id}{origin_note}")
-        profile = load_profile(profile_id)
-        if not (profile.get("github") or {}).get("token"):
-            fail(f"Error: profile '{profile_id}' has no [github].token to warm")
-        token = get_cached_token(profile_id)
-        if token is None:
-            token = fetch_token_from_1password(profile_id, profile)
-            cache_token(profile_id, token)
-        err(f"GitHub token: ...{token[-5:]}")
+        has_profile_token = bool(profile_id and profile_id != "none"
+                                 and (load_profile(profile_id).get("github") or {}).get("token"))
+        if not has_profile_token and not any(bundle_env_op(b, n) for n, b in bundles.items()):
+            fail("Error: --warm-token found nothing to warm: no profile with a [github].token "
+                 "(use -p) and no -e bundle with [env.<name>.op] entries")
+        if has_profile_token:
+            err(f"Profile: {profile_id}{origin_note}")
+            token = get_cached_token(profile_id)
+            if token is None:
+                token = fetch_token_from_1password(profile_id, load_profile(profile_id))
+                cache_token(profile_id, token)
+            err(f"GitHub token: ...{token[-5:]}")
+        for name, b in bundles.items():
+            for var, value in resolve_bundle_secrets(name, b).items():
+                err(f"Env: {var} ...{value[-4:]} ([env.{name}])")
         return
 
     safehouse_bin = shutil.which(SAFEHOUSE) or (SAFEHOUSE if Path(SAFEHOUSE).is_file() else None)
@@ -1122,6 +1288,24 @@ def main() -> None:
     for var in profile_env_pass(profile):
         safehouse_args.append(f"--env-pass={var}")
         err(f"Env: passing {var}={os.environ.get(var, '(unset)')} through")
+
+    # -e bundles: every variable is exported into sc's own environment and
+    # forwarded by name, the same route GITHUB_TOKEN takes below. Secret values
+    # are never printed, only their last characters.
+    for name, b in bundles.items():
+        plain = bundle_env_vars(b, name)
+        for var, value in plain.items():
+            os.environ[var] = value
+            safehouse_args.append(f"--env-pass={var}")
+        if plain:
+            err(f"Env: {name} -> " + ", ".join(f"{k}={v}" for k, v in plain.items()))
+        for var in bundle_env_pass(b, name):
+            safehouse_args.append(f"--env-pass={var}")
+            err(f"Env: {name} -> passing {var}={os.environ.get(var, '(unset)')} through")
+        for var, value in resolve_bundle_secrets(name, b).items():
+            os.environ[var] = value
+            safehouse_args.append(f"--env-pass={var}")
+            err(f"Env: {name} -> {var} ...{value[-4:]} (1Password)")
 
     if profile and (profile.get("github") or {}).get("token"):
         token = get_cached_token(profile_id)

@@ -80,6 +80,7 @@ sc -p                         # fzf-pick a profile, persist
 sc -p <name>                  # use the named profile, persist
 sc -P                         # explicitly use no profile (no token, no dirs)
 sc -a                         # mount ~/.aws (rw) and pass AWS_PROFILE (checks login first)
+sc -e datadog                 # hand over the [env.datadog] bundle from config.toml (repeatable)
 sc -k                         # allow macOS Keychain access (denied by default)
 sc -y                         # pass the agent's "skip all prompts" flag
 sc -m                         # claude --permission-mode auto (bare -m == auto)
@@ -163,6 +164,26 @@ union. Groups sharing a member do not chain. `~` and `$VARS` expand, symlinks
 resolve, and missing dirs are skipped with a warning. Unlike profile `[dirs]`,
 this file applies to every launch regardless of profile, including `-P`. See
 `docs/dir-groups.md`.
+
+## Env bundles (`-e <name>`)
+
+A tool inside the sandbox that needs a credential cannot reach the macOS
+Keychain, so `config.toml` can declare `[env.<name>]` bundles: plain values,
+1Password `op://` references sc resolves on the host (Keychain-cached like the
+GitHub token), and forwarded host variables. `sc -e datadog` hands the whole
+bundle to the sandbox as environment variables. See `docs/env-bundles.md`.
+
+```toml
+[env.datadog]
+op_account = "my-team.1password.eu"
+[env.datadog.vars]
+DD_SITE = "datadoghq.eu"
+DD_TOKEN_STORAGE = "file"
+PUP_CONFIG_DIR = "$TMPDIR/pup"
+[env.datadog.op]
+DD_API_KEY = "op://Vault/Datadog/api-key"
+DD_APP_KEY = "op://Vault/Datadog/app-key"
+```
 
 ## Profile files
 

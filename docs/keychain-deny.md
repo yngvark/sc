@@ -53,6 +53,9 @@ the sandbox, so the agent cannot edit the fragment.
   is current.
 - Escape hatch: `sc -k` / `sc --keychain` skips the fragment for tools that
   genuinely need the keychain.
+- A tool that only needs a credential the Keychain would have held can get it
+  as an environment variable instead, resolved on the host: `sc -e <name>`,
+  see `env-bundles.md`.
 
 ## Alternatives considered
 
