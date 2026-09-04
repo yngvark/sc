@@ -18,8 +18,9 @@ browse  Python holds the current directory and each level is a fresh fzf run.
         Enter only moves: into a subdirectory, up on ../, over to ~ or /.
         ctrl-s takes the row under the cursor (or every Tab-marked row) and
         finishes; ctrl-a takes them and keeps you browsing, so directories in
-        unrelated trees can go in one selection. ./ is the row that means the
-        directory you are standing in.
+        unrelated trees can go in one selection. Nothing represents the
+        directory you are standing in — go up, where ../ leaves it under the
+        cursor, and take it there.
 
 live    One fzf whose list follows the path you type. Typing `~/src/mo` lists
         `~/src` and filters it; typing `/opt/` walks off anywhere. Tab marks,
@@ -34,13 +35,12 @@ from pathlib import Path
 
 FZF_BIN = os.environ.get("SC_FZF_BIN", "fzf")
 
-SELF = "./"
 PARENT = "../"
 JUMPS = ["~", "/"]
 
 BROWSE_HEADER = (
     "enter: open   ctrl-s: take it, done   ctrl-a: take it, keep browsing"
-    "\ntab: mark several   ./ is the directory you are in"
+    "\ntab: mark several   ../ goes up and lands on the directory you left"
 )
 LIVE_HEADER = "type a path to go anywhere   tab: mark   enter: pick"
 
@@ -86,13 +86,22 @@ def subdirs(current: str) -> list[str]:
 
 
 def browse_entries(current: str) -> list[str]:
-    """One level's fzf menu: this dir, the parent, the subdirs, then the jumps."""
-    rows = [SELF]
+    """One level's fzf menu: the parent, this level's subdirs, then the jumps.
+
+    There is no row for the current directory. Taking it means going up, where
+    it is waiting under the cursor — one row rather than one row per level.
+    """
+    rows = []
     if current != "/":
         rows.append(PARENT)
     rows += [n + "/" for n in subdirs(current)]
     rows += [j for j in JUMPS if os.path.realpath(expand_home(j)) != current]
     return rows
+
+
+def cursor_index(rows: list[str], row: str) -> int:
+    """fzf's 1-based position of `row`, or 1 when it is not in the list."""
+    return rows.index(row) + 1 if row in rows else 1
 
 
 def list_for_query(query: str, home_base: str) -> list[str]:
@@ -116,7 +125,8 @@ def list_for_query(query: str, home_base: str) -> list[str]:
     return [f"{prefix}/{n}" for n in subdirs(base)]
 
 
-def run_fzf(rows: list[str], prompt: str, header: str, expect: list[str]) -> tuple[str, list[str]]:
+def run_fzf(rows: list[str], prompt: str, header: str, expect: list[str],
+            cursor: int = 1) -> tuple[str, list[str]]:
     """Returns (key pressed, selected lines). Key is "" for plain Enter."""
     args = [
         FZF_BIN,
@@ -127,6 +137,10 @@ def run_fzf(rows: list[str], prompt: str, header: str, expect: list[str]) -> tup
         f"--prompt={prompt}",
         f"--header={header}",
     ]
+    if cursor > 1:
+        # On load, not start: at start fzf has not read stdin yet, so there is
+        # no list to move the cursor within and the position is ignored.
+        args.append(f"--bind=load:pos({cursor})")
     if expect:
         args.append("--expect=" + ",".join(expect))
     proc = subprocess.run(args, input="\n".join(rows), text=True, capture_output=True)
@@ -165,6 +179,7 @@ def run_fzf_live(start: str) -> list[str]:
 def browse(start: str) -> list[str]:
     """The file-manager loop. Returns the accumulated realpaths."""
     current = os.path.realpath(start)
+    land_on = ""          # row the cursor should start on, set when moving up
     picked: list[str] = []
 
     def add(rows: list[str]) -> None:
@@ -174,16 +189,18 @@ def browse(start: str) -> list[str]:
                 picked.append(target)
 
     while True:
+        entries = browse_entries(current)
         count = f" ({len(picked)} selected)" if picked else ""
         prompt = f"{compress_home(current)}{count}> "
         key, rows = run_fzf(
-            browse_entries(current), prompt, BROWSE_HEADER, ["ctrl-a", "ctrl-s"],
+            entries, prompt, BROWSE_HEADER, ["ctrl-a", "ctrl-s"],
+            cursor_index(entries, land_on),
         )
+        land_on = ""
         if key == "abort":
             return []
         # ../ is a way to move, never something to mount, so it is dropped from
-        # anything that selects. Mounting the parent means going up and taking
-        # ./ there.
+        # anything that selects.
         if key == "ctrl-a":
             add([r for r in rows if r != PARENT])
             continue
@@ -191,12 +208,13 @@ def browse(start: str) -> list[str]:
             add([r for r in rows if r != PARENT])
             return picked
         if rows:                      # plain enter: open the row under the cursor
+            if rows[0] == PARENT:
+                # Land on the directory just left, so taking it is one more key.
+                land_on = os.path.basename(current) + "/"
             current = resolve_row(current, rows[0])
 
 
 def resolve_row(current: str, row: str) -> str:
-    if row == SELF:
-        return current
     if row == PARENT:
         return os.path.dirname(current) or "/"
     if row in JUMPS:
