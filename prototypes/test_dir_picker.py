@@ -151,6 +151,23 @@ def test_browse_up_then_picks_the_dir_it_landed_in(tmp):
     assert out == [os.path.realpath(os.path.join(root, "a"))], out
 
 
+def test_enter_on_parent_goes_up_instead_of_picking_it(tmp):
+    root = os.path.join(tmp, "root")
+    os.makedirs(os.path.join(root, "a", "deep"))
+    out, proc = run_picker(tmp, ["\t../", "\t./"], [os.path.join(root, "a", "deep")])
+    assert proc.returncode == 0, proc.stderr
+    assert out == [os.path.realpath(os.path.join(root, "a"))], out
+
+
+def test_enter_on_parent_alongside_marks_ignores_the_parent(tmp):
+    root = os.path.join(tmp, "root")
+    os.makedirs(os.path.join(root, "a"))
+    os.makedirs(os.path.join(root, "b"))
+    out, proc = run_picker(tmp, ["\t../\ta/\tb/"], [root])
+    assert proc.returncode == 0, proc.stderr
+    assert out == [os.path.realpath(os.path.join(root, p)) for p in ("a", "b")], out
+
+
 def test_picking_nothing_exits_nonzero(tmp):
     root = os.path.join(tmp, "root")
     os.makedirs(root)
@@ -172,6 +189,8 @@ def main() -> int:
             test_list_for_query_compresses_home]
     e2e = [test_browse_descends_then_picks, test_browse_banks_marks_across_levels,
            test_browse_up_then_picks_the_dir_it_landed_in,
+           test_enter_on_parent_goes_up_instead_of_picking_it,
+           test_enter_on_parent_alongside_marks_ignores_the_parent,
            test_picking_nothing_exits_nonzero]
     for t in unit:
         with tempfile.TemporaryDirectory() as tmp:

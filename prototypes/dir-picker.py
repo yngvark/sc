@@ -16,7 +16,8 @@ Two interaction models are implemented so they can be compared:
 
 browse  Python holds the current directory and each level is a fresh fzf run.
         ctrl-o descends, ctrl-u goes up, Tab marks, ctrl-a banks the marks and
-        keeps browsing, Enter finishes.
+        keeps browsing, Enter finishes. Enter on ../ goes up instead, so the
+        reflex key works for the one navigation everyone reaches for.
 
 live    One fzf whose list follows the path you type. Typing `~/src/mo` lists
         `~/src` and filters it; typing `/opt/` walks off anywhere. Tab marks,
@@ -37,7 +38,7 @@ JUMPS = ["~", "/"]
 
 BROWSE_HEADER = (
     "enter: pick   ctrl-o: open   ctrl-u: up   tab: mark   ctrl-a: mark & keep browsing"
-    "\n./ is the directory you are in"
+    "\n./ is the directory you are in   enter on ../ goes up"
 )
 LIVE_HEADER = "type a path to go anywhere   tab: mark   enter: pick"
 
@@ -189,9 +190,14 @@ def browse(start: str) -> list[str]:
         if key == "ctrl-a":
             add(rows)
             continue
-        # Plain Enter: bank what is marked and finish. Enter on nothing with
-        # something already banked means "that's all", so it is not an abort.
-        add(rows)
+        # Plain Enter. On ../ alone it navigates rather than picks, because
+        # pressing enter on a parent row reads as "go there" — to mount the
+        # parent, go up and take ./ instead. Alongside marked rows ../ is
+        # ignored, so a stray mark cannot swallow the selection.
+        if rows == [PARENT]:
+            current = os.path.dirname(current) or "/"
+            continue
+        add([r for r in rows if r != PARENT])
         return picked
 
 
