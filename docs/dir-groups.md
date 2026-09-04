@@ -40,6 +40,10 @@ still restarts, and it only helps *after* you have already discovered the gap.
 Declaring the dirs removes the discovery step — by the time you need the
 directory, it is already granted.
 
+A group is for directories you reach for whenever you work somewhere. For the
+one-off directory, `-dw` and `-dr` with no path browse for it instead of making
+you recall an exact path; see `dir-picker.md`.
+
 ## Why a group rather than a launch-dir → grants mapping
 
 The relation between a project and its scratch dir, its notes, or a sibling repo

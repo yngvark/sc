@@ -37,6 +37,7 @@ HISTORY_FILE = PROFILE_DIR / "history.jsonl"
 CONFIG_FILE = PROFILE_DIR / "config.toml"
 HISTORY_MAX = 100
 SAFEHOUSE = os.environ.get("SAFEHOUSE_BIN", "safehouse")
+FZF_BIN = os.environ.get("SC_FZF_BIN", "fzf")
 
 # safehouse policy features sc always enables. Each entry is a `--enable=`
 # flag; add a case here rather than branching at launch time.
@@ -588,12 +589,33 @@ class EnvForwarding:
 
 
 def fzf_pick(options: list[str], prompt: str) -> str:
-    proc = subprocess.run(
-        ["fzf", f"--prompt={prompt}"],
-        input="\n".join(options),
-        text=True, capture_output=True,
-    )
-    return proc.stdout.strip()
+    _, lines = fzf_run(options, prompt)
+    return lines[0] if lines else ""
+
+
+def fzf_run(options: list[str], prompt: str, *, header: str = "",
+            expect: tuple[str, ...] = (), multi: bool = False,
+            cursor: int = 1) -> tuple[str, list[str]]:
+    """Run fzf. Returns (key pressed, chosen lines); the key is "" for Enter
+    and "abort" when fzf was cancelled."""
+    args = [FZF_BIN, f"--prompt={prompt}"]
+    if header:
+        args.append(f"--header={header}")
+    if multi:
+        args.append("--multi")
+    if cursor > 1:
+        # On load, not start: at start fzf has not read stdin yet, so there is
+        # no list to position the cursor within and pos() does nothing.
+        args.append(f"--bind=load:pos({cursor})")
+    if expect:
+        args.append("--expect=" + ",".join(expect))
+    proc = subprocess.run(args, input="\n".join(options), text=True, capture_output=True)
+    if proc.returncode not in (0, 1):          # 130 = Esc / ctrl-c
+        return "abort", []
+    out = proc.stdout.split("\n")
+    if not expect:
+        return "", [line.strip() for line in out if line.strip()]
+    return (out[0] if out else ""), [line.strip() for line in out[1:] if line.strip()]
 
 
 def compress_home(path: str) -> str:
@@ -608,6 +630,148 @@ def compress_home(path: str) -> str:
 
 def expand_home(path: str) -> str:
     return str(Path(path).expanduser())
+
+
+PICK = "\0pick"          # stands in for a -dr/-dw the user left without a path
+PARENT = "../"
+JUMPS = ["~", "/"]
+BROWSE_HEADER = (
+    "enter: open   ctrl-s: take it, done   ctrl-a: take it, keep browsing"
+    "\ntab: mark several   ../ goes up and lands on the directory you left"
+)
+
+
+def subdirs(current: str) -> list[str]:
+    """Directory names one level under `current`, sorted, dotdirs last.
+
+    A directory sc may not read yields nothing rather than raising, so browsing
+    into one shows an empty level instead of ending the launch.
+    """
+    try:
+        entries = list(os.scandir(current))
+    except OSError:
+        return []
+    names = []
+    for e in entries:
+        try:
+            if e.is_dir():
+                names.append(e.name)
+        except OSError:
+            continue
+    return sorted(names, key=lambda n: (n.startswith("."), n.lower()))
+
+
+def browse_entries(current: str) -> list[str]:
+    """One level's fzf menu: the parent, this level's subdirs, then the jumps.
+
+    There is no row for the current directory. Taking it means going up, where
+    it is waiting under the cursor — one row rather than one row per level.
+    """
+    rows = []
+    if current != "/":
+        rows.append(PARENT)
+    rows += [n + "/" for n in subdirs(current)]
+    rows += [j for j in JUMPS if os.path.realpath(expand_home(j)) != current]
+    return rows
+
+
+def cursor_index(rows: list[str], row: str) -> int:
+    """fzf's 1-based position of `row`, or 1 when it is not in the list."""
+    return rows.index(row) + 1 if row in rows else 1
+
+
+def browse_row_target(current: str, row: str) -> str:
+    if row == PARENT:
+        return os.path.dirname(current) or "/"
+    if row in JUMPS:
+        return os.path.realpath(expand_home(row))
+    return os.path.realpath(os.path.join(current, row.rstrip("/")))
+
+
+def pick_dirs(start: str, access: str) -> list[str]:
+    """Browse for directories to mount. Returns realpaths, empty if cancelled.
+
+    Enter only moves — into a subdirectory, up on ../, over to ~ or /. ctrl-s
+    takes the row under the cursor (or every Tab-marked row) and returns;
+    ctrl-a takes them and stays, so directories in unrelated trees can go into
+    one selection.
+    """
+    current = os.path.realpath(start)
+    land_on = ""          # row the cursor should start on, set when moving up
+    picked: list[str] = []
+
+    def take(rows: list[str]) -> None:
+        # ../ is a way to move, never something to mount, so it never counts.
+        for row in (r for r in rows if r != PARENT):
+            target = browse_row_target(current, row)
+            if target not in picked:
+                picked.append(target)
+
+    while True:
+        entries = browse_entries(current)
+        count = f" ({len(picked)} selected)" if picked else ""
+        key, rows = fzf_run(
+            entries, f"{access} {compress_home(current)}{count}> ",
+            header=BROWSE_HEADER, expect=("ctrl-a", "ctrl-s"), multi=True,
+            cursor=cursor_index(entries, land_on),
+        )
+        land_on = ""
+        if key == "abort":
+            return []
+        if key == "ctrl-a":
+            take(rows)
+            continue
+        if key == "ctrl-s":
+            take(rows)
+            return picked
+        if rows:                    # plain enter: open the row under the cursor
+            if rows[0] == PARENT:
+                # Land on the directory just left, so taking it is one more key.
+                land_on = os.path.basename(current) + "/"
+            current = browse_row_target(current, rows[0])
+
+
+def resolve_picks(dirs: list[str], access: str, start: str) -> tuple[list[str], list[list[str]]]:
+    """Replace every PICK sentinel in `dirs` with what the browser returns.
+
+    Also returns what each sentinel became, in order, so the launch recorded
+    for `sc -H` can name the directories instead of re-opening the picker.
+    """
+    out: list[str] = []
+    per_pick: list[list[str]] = []
+    for d in dirs:
+        if d != PICK:
+            out.append(d)
+            continue
+        chosen = pick_dirs(start, access)
+        if not chosen:
+            fail("Nothing selected.")
+        err(f"Dirs: picked {', '.join(compress_home(c) for c in chosen)} ({access})")
+        out += chosen
+        per_pick.append(chosen)
+    return out, per_pick
+
+
+def argv_with_picks(argv: list[str], ro_picks: list[list[str]],
+                    rw_picks: list[list[str]]) -> list[str]:
+    """The argv as if the picked paths had been typed, for the history file."""
+    queues = {"-dr": list(ro_picks), "-dw": list(rw_picks)}
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            out += argv[i:]
+            break
+        nxt = argv[i + 1] if i + 1 < len(argv) else ""
+        bare = a in queues and not (nxt and not nxt.startswith("-") and nxt != "--")
+        if bare and queues[a]:
+            for path in queues[a].pop(0):
+                out += [a, compress_home(path)]
+        else:
+            out.append(a)
+        i += 1
+    return out
 
 
 def permission_flags(yes: bool, mode: str, yolo_flag: str) -> list[str]:
@@ -963,6 +1127,12 @@ Options:
                        somewhere, use [group] in config.toml below instead — the
                        sandbox cannot be widened once a session is running, so a
                        forgotten -dw costs a relaunch.
+  -dr / -dw            Without a path, browse for the directories in fzf:
+                       enter opens the row under the cursor, ctrl-s takes it
+                       and starts the launch, ctrl-a takes it and keeps the
+                       picker open for another tree, tab marks several. To take
+                       the directory you are in, go up — the cursor lands on
+                       the name you left.
   -H, --history        fzf-pick a previous launch (dir + args) and re-run it
                        in that directory. History is recorded automatically
                        on every launch to ~/.config/sc/history.jsonl, which
@@ -1113,12 +1283,18 @@ def parse_args(argv: list[str]) -> tuple[bool, str, bool, bool, bool, bool, bool
         elif a in ("-s", "--shell"):
             shell = True
             i += 1
-        elif a == "-dr":
-            value, i = take_value(a, i)
-            ro_dirs.append(value)
-        elif a == "-dw":
-            value, i = take_value(a, i)
-            rw_dirs.append(value)
+        elif a in ("-dr", "-dw"):
+            # No path means "let me browse for one". The sentinel keeps this
+            # out of parse_args, which must stay free of subprocesses, and out
+            # of the return tuple, whose positions tests index from the end.
+            target = ro_dirs if a == "-dr" else rw_dirs
+            nxt = argv[i + 1] if i + 1 < len(argv) else ""
+            if nxt and not nxt.startswith("-") and nxt != "--":
+                target.append(nxt)
+                i += 2
+            else:
+                target.append(PICK)
+                i += 1
         elif a in ("-e", "--env"):
             value, i = take_value(a, i)
             if value not in env_bundles:
@@ -1225,6 +1401,14 @@ def main() -> None:
     require_safehouse_version(safehouse_bin)
 
     aws_profile = check_aws_ready() if aws else ""
+
+    # After every cheap check, before anything with a side effect: a bad flag or
+    # an expired AWS login should stop the launch without opening a picker first.
+    recorded_argv = sys.argv[1:]
+    if PICK in ro_dirs or PICK in rw_dirs:
+        ro_dirs, ro_picks = resolve_picks(ro_dirs, "ro", invocation_cwd)
+        rw_dirs, rw_picks = resolve_picks(rw_dirs, "rw", invocation_cwd)
+        recorded_argv = argv_with_picks(recorded_argv, ro_picks, rw_picks)
 
     if not shell:
         passthrough[:0] = permission_flags(yes, mode, yolo_flag)
@@ -1376,7 +1560,7 @@ def main() -> None:
 
     safehouse_args += forwarding.flags
 
-    record_launch(sys.argv[1:], cwd=invocation_cwd)
+    record_launch(recorded_argv, cwd=invocation_cwd)
 
     # Last, so that every `op` and `security` call above ran with the host's
     # environment rather than one a bundle rewrote (see EnvForwarding.apply).
