@@ -117,6 +117,19 @@ def test_cursor_index_is_one_based_and_falls_back_to_the_top(sc) -> None:
     assert sc.cursor_index(rows, "") == 1
 
 
+def test_picker_opens_on_the_parent_with_the_cwd_under_the_cursor(sc, tmp: Path) -> None:
+    """So ctrl-s alone mounts the directory sc was launched in."""
+    here = tmp / "start" / "here"
+    here.mkdir(parents=True)
+    start, land_on = sc.picker_start(str(here))
+    assert start == os.path.realpath(tmp / "start"), start
+    assert land_on == "here/", land_on
+
+
+def test_picker_start_at_the_filesystem_root_stays_there(sc) -> None:
+    assert sc.picker_start("/") == ("/", "")
+
+
 def test_recorded_argv_names_the_picked_dirs(sc) -> None:
     """`sc -H` replays a launch verbatim, so a bare -dw must not survive into it."""
     argv = sc.argv_with_picks(["-p", "work", "-dw", "-y"], [], [["/x", "/y"]])
@@ -198,29 +211,50 @@ def _granted(argv: list[str], flag: str) -> list[str]:
     return []
 
 
+def _here(tmp: Path, *subdirs: str) -> Path:
+    """A `here` dir to launch from, so the picker opens on `tmp` above it."""
+    here = tmp / "here"
+    here.mkdir(parents=True, exist_ok=True)
+    for s in subdirs:
+        (here / s).mkdir(parents=True, exist_ok=True)
+    return here
+
+
+def test_e2e_ctrl_s_alone_mounts_the_launch_dir(tmp: Path, home: Path) -> None:
+    """The default: the browser opens above you, cursor already on where you are."""
+    here = _here(tmp, "aaa", "zzz")
+    proc, argv, runs = _launch(home, str(here), ["-dw"], ["ctrl-s\there/"])
+    assert proc.returncode == 99, proc.stderr
+    assert os.path.realpath(here) in _granted(argv, "--add-dirs="), argv
+    # aaa and zzz sit inside here, so the parent lists ../ here/ ~ / and the
+    # cursor starts on the second row.
+    assert "--bind=load:pos(2)" in runs[0], runs[0]
+
+
 def test_e2e_picked_dir_reaches_safehouse_rw(tmp: Path, home: Path) -> None:
-    (tmp / "src" / "monorepo").mkdir(parents=True)
-    proc, argv, _ = _launch(home, str(tmp), ["-dw"], ["\tsrc/", "ctrl-s\tmonorepo/"])
+    here = _here(tmp, "src/monorepo")
+    proc, argv, _ = _launch(
+        home, str(here), ["-dw"], ["\there/", "\tsrc/", "ctrl-s\tmonorepo/"])
     assert proc.returncode == 99, f"sc did not reach exec: {proc.stderr}"
-    want = os.path.realpath(tmp / "src" / "monorepo")
+    want = os.path.realpath(here / "src" / "monorepo")
     assert want in _granted(argv, "--add-dirs="), argv
 
 
 def test_e2e_dr_grants_read_only(tmp: Path, home: Path) -> None:
-    (tmp / "refs").mkdir(parents=True)
-    proc, argv, _ = _launch(home, str(tmp), ["-dr"], ["ctrl-s\trefs/"])
+    here = _here(tmp, "refs")
+    proc, argv, _ = _launch(home, str(here), ["-dr"], ["\there/", "ctrl-s\trefs/"])
     assert proc.returncode == 99, proc.stderr
-    want = os.path.realpath(tmp / "refs")
+    want = os.path.realpath(here / "refs")
     assert want in _granted(argv, "--add-dirs-ro="), argv
     assert want not in _granted(argv, "--add-dirs="), argv
 
 
 def test_e2e_ctrl_a_collects_across_trees(tmp: Path, home: Path) -> None:
-    for name in ("a", "b", "far"):
-        (tmp / name).mkdir(parents=True)
+    here = _here(tmp, "a", "b", "far")
     proc, argv, _ = _launch(
-        home, str(tmp), ["-dw"],
-        ["ctrl-a\ta/\tb/",      # take two here, keep the picker open
+        home, str(here), ["-dw"],
+        ["\there/",             # enter walks in from the parent
+         "ctrl-a\ta/\tb/",      # take two here, keep the picker open
          "\tfar/",              # enter walks in
          "\t../",               # and back out
          "ctrl-s\tfar/"],       # take it, launch
@@ -228,42 +262,45 @@ def test_e2e_ctrl_a_collects_across_trees(tmp: Path, home: Path) -> None:
     assert proc.returncode == 99, proc.stderr
     granted = _granted(argv, "--add-dirs=")
     for name in ("a", "b", "far"):
-        assert os.path.realpath(tmp / name) in granted, (name, granted)
+        assert os.path.realpath(here / name) in granted, (name, granted)
 
 
 def test_e2e_going_up_lands_the_cursor_on_the_directory_just_left(tmp: Path, home: Path) -> None:
-    """Taking the directory you are in is enter on ../ then ctrl-s."""
-    for name in ("aaa", "deep", "zzz"):
-        (tmp / "up" / name).mkdir(parents=True)
-    start = tmp / "up" / "deep"
-    proc, argv, runs = _launch(home, str(start), ["-dw"], ["\t../", "ctrl-s\tdeep/"])
+    here = _here(tmp, "aaa", "deep", "zzz")
+    proc, argv, runs = _launch(
+        home, str(here), ["-dw"],
+        ["\there/",             # into the launch dir
+         "\t../",               # straight back out
+         "ctrl-s\there/"],      # the cursor is waiting on it
+    )
     assert proc.returncode == 99, proc.stderr
-    assert os.path.realpath(start) in _granted(argv, "--add-dirs="), argv
-    # ../ aaa/ deep/ zzz/ ~ / — deep/ is the third row.
-    assert "--bind=load:pos(3)" in runs[1], runs[1]
-    assert not any(a.startswith("--bind=load:pos") for a in runs[0]), runs[0]
+    assert os.path.realpath(here) in _granted(argv, "--add-dirs="), argv
+    # ../ here/ ~ / — here/ is the second row, on the way out as on the way in.
+    assert "--bind=load:pos(2)" in runs[2], runs[2]
+    assert not any(a.startswith("--bind=load:pos") for a in runs[1]), runs[1]
 
 
 def test_e2e_parent_row_is_never_mounted(tmp: Path, home: Path) -> None:
     """../ moves; mounting it would quietly grant a whole tree above the target."""
-    (tmp / "deep" / "a").mkdir(parents=True)
-    proc, argv, _ = _launch(home, str(tmp / "deep"), ["-dw"], ["ctrl-s\t../\ta/"])
+    here = _here(tmp, "a")
+    proc, argv, _ = _launch(
+        home, str(here), ["-dw"], ["\there/", "ctrl-s\t../\ta/"])
     assert proc.returncode == 99, proc.stderr
     granted = _granted(argv, "--add-dirs=")
-    assert os.path.realpath(tmp / "deep" / "a") in granted, granted
+    assert os.path.realpath(here / "a") in granted, granted
     assert os.path.realpath(tmp) not in granted, granted
 
 
 def test_e2e_cancelling_the_picker_stops_the_launch(tmp: Path, home: Path) -> None:
-    proc, argv, _ = _launch(home, str(tmp), ["-dw"], ["ctrl-s\t"])
+    proc, argv, _ = _launch(home, str(_here(tmp)), ["-dw"], ["ctrl-s\t"])
     assert proc.returncode == 1, proc.stdout
     assert argv == [], argv
     assert "Nothing selected." in proc.stderr
 
 
 def test_e2e_history_records_the_picked_dir(tmp: Path, home: Path) -> None:
-    (tmp / "hist").mkdir(parents=True)
-    proc, _, _ = _launch(home, str(tmp), ["-dw"], ["ctrl-s\thist/"])
+    here = _here(tmp, "hist")
+    proc, _, _ = _launch(home, str(here), ["-dw"], ["\there/", "ctrl-s\thist/"])
     assert proc.returncode == 99, proc.stderr
     entry = json.loads((home / "config" / "history.jsonl").read_text().splitlines()[0])
     assert "-dw" in entry["args"], entry
@@ -282,12 +319,15 @@ def main() -> None:
         test_browse_entries_at_the_filesystem_root_has_no_parent(sc)
         test_subdirs_sorts_dotdirs_last_and_survives_an_unreadable_dir(sc, tmp)
         test_cursor_index_is_one_based_and_falls_back_to_the_top(sc)
+        test_picker_opens_on_the_parent_with_the_cwd_under_the_cursor(sc, tmp)
+        test_picker_start_at_the_filesystem_root_stays_there(sc)
         test_recorded_argv_names_the_picked_dirs(sc)
         test_recorded_argv_leaves_typed_paths_and_passthrough_alone(sc)
         test_recorded_argv_uses_home_relative_paths(sc)
 
         home = Path(profile_dir)
         for i, t in enumerate([
+            test_e2e_ctrl_s_alone_mounts_the_launch_dir,
             test_e2e_picked_dir_reaches_safehouse_rw,
             test_e2e_dr_grants_read_only,
             test_e2e_ctrl_a_collects_across_trees,

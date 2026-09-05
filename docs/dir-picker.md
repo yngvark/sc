@@ -5,15 +5,20 @@ take there becomes `--add-dirs=` / `--add-dirs-ro=` for the launch.
 
 ```
 $ cd ~/src/myproject && sc -dw
-~/src/myproject> ▏
+rw ~/src> ▏
   enter: open   ctrl-s: take it, done   ctrl-a: take it, keep browsing
   tab: mark several   ../ goes up and lands on the directory you left
   ../
-  docs/
-  src/
+> myproject/
+  otherproject/
   ~
   /
 ```
+
+The browser opens on the parent of the directory sc was launched in, with the
+cursor already on that directory, so `ctrl-s` alone mounts where you are. That
+is both the likeliest thing to want and one Enter away from its siblings, which
+are the next likeliest.
 
 ## Why a picker rather than a better path syntax
 
@@ -43,7 +48,8 @@ stops the launch, discarding anything already taken.
 Nothing in the list stands for the directory you are standing in. Instead,
 `../` moves up and leaves the cursor on the name you just left, so taking it is
 Enter then `ctrl-s`. A `./` row would otherwise repeat on every level for a
-case that this handles in one extra keystroke.
+case that this handles in one extra keystroke — and opening on the parent means
+the common case needs no keystroke at all.
 
 `../` is a way to move and is dropped from anything that selects, including a
 Tab mark. Mounting it by accident would grant the whole tree above the

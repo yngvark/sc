@@ -598,7 +598,9 @@ def fzf_run(options: list[str], prompt: str, *, header: str = "",
             cursor: int = 1) -> tuple[str, list[str]]:
     """Run fzf. Returns (key pressed, chosen lines); the key is "" for Enter
     and "abort" when fzf was cancelled."""
-    args = [FZF_BIN, f"--prompt={prompt}"]
+    # Home and End on a full-size Mac keyboard (the ↖ and ↘ keys above the
+    # arrows) jump to the ends of the list rather than the ends of the query.
+    args = [FZF_BIN, f"--prompt={prompt}", "--bind=home:first,end:last"]
     if header:
         args.append(f"--header={header}")
     if multi:
@@ -688,7 +690,20 @@ def browse_row_target(current: str, row: str) -> str:
     return os.path.realpath(os.path.join(current, row.rstrip("/")))
 
 
-def pick_dirs(start: str, access: str) -> list[str]:
+def picker_start(cwd: str) -> tuple[str, str]:
+    """Where the browser opens: the parent of `cwd`, cursor on `cwd` itself.
+
+    The directory sc was launched in is the likeliest thing to mount and the
+    likeliest neighbour of the next likeliest, so both are one keystroke away.
+    """
+    current = os.path.realpath(cwd)
+    parent = os.path.dirname(current)
+    if not parent or parent == current:
+        return current, ""
+    return parent, os.path.basename(current) + "/"
+
+
+def pick_dirs(start: str, access: str, land_on: str = "") -> list[str]:
     """Browse for directories to mount. Returns realpaths, empty if cancelled.
 
     Enter only moves — into a subdirectory, up on ../, over to ~ or /. ctrl-s
@@ -697,7 +712,6 @@ def pick_dirs(start: str, access: str) -> list[str]:
     one selection.
     """
     current = os.path.realpath(start)
-    land_on = ""          # row the cursor should start on, set when moving up
     picked: list[str] = []
 
     def take(rows: list[str]) -> None:
@@ -731,19 +745,20 @@ def pick_dirs(start: str, access: str) -> list[str]:
             current = browse_row_target(current, rows[0])
 
 
-def resolve_picks(dirs: list[str], access: str, start: str) -> tuple[list[str], list[list[str]]]:
+def resolve_picks(dirs: list[str], access: str, cwd: str) -> tuple[list[str], list[list[str]]]:
     """Replace every PICK sentinel in `dirs` with what the browser returns.
 
     Also returns what each sentinel became, in order, so the launch recorded
     for `sc -H` can name the directories instead of re-opening the picker.
     """
+    start, land_on = picker_start(cwd)
     out: list[str] = []
     per_pick: list[list[str]] = []
     for d in dirs:
         if d != PICK:
             out.append(d)
             continue
-        chosen = pick_dirs(start, access)
+        chosen = pick_dirs(start, access, land_on)
         if not chosen:
             fail("Nothing selected.")
         err(f"Dirs: picked {', '.join(compress_home(c) for c in chosen)} ({access})")
@@ -1127,12 +1142,12 @@ Options:
                        somewhere, use [group] in config.toml below instead — the
                        sandbox cannot be widened once a session is running, so a
                        forgotten -dw costs a relaunch.
-  -dr / -dw            Without a path, browse for the directories in fzf:
-                       enter opens the row under the cursor, ctrl-s takes it
-                       and starts the launch, ctrl-a takes it and keeps the
-                       picker open for another tree, tab marks several. To take
-                       the directory you are in, go up — the cursor lands on
-                       the name you left.
+  -dr / -dw            Without a path, browse for the directories in fzf. The
+                       browser opens on the parent of the current dir with the
+                       cursor already on it, so ctrl-s alone mounts where you
+                       are. Enter opens the row under the cursor, ctrl-s takes
+                       it and starts the launch, ctrl-a takes it and keeps the
+                       picker open for another tree, tab marks several.
   -H, --history        fzf-pick a previous launch (dir + args) and re-run it
                        in that directory. History is recorded automatically
                        on every launch to ~/.config/sc/history.jsonl, which

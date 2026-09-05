@@ -130,11 +130,11 @@ See `safehouse --help` for the full set of flags
 
 `sc -dw` without a path opens an fzf directory browser, for the one-off case
 where you would otherwise have to recall and type an exact path before the
-sandbox starts. Enter only moves — into a subdirectory, up on `../`, over to
-`~` or `/`. `ctrl-s` takes the row under the cursor (or every Tab-marked row)
-and launches; `ctrl-a` takes them and keeps the picker open for another tree.
-There is no `./` row: `../` leaves the cursor on the directory you just left,
-so taking the one you are in is Enter then `ctrl-s`. See `docs/dir-picker.md`.
+sandbox starts. It opens on the parent of the current directory with the cursor
+already on it, so `ctrl-s` alone mounts where you are. Enter only moves — into
+a subdirectory, up on `../`, over to `~` or `/`. `ctrl-s` takes the row under
+the cursor (or every Tab-marked row) and launches; `ctrl-a` takes them and
+keeps the picker open for another tree. See `docs/dir-picker.md`.
 
 ## Directory groups (`config.toml`)
 

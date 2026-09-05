@@ -134,6 +134,7 @@ def run_fzf(rows: list[str], prompt: str, header: str, expect: list[str],
         "--height=60%",
         "--reverse",
         "--info=inline",
+        "--bind=home:first,end:last",
         f"--prompt={prompt}",
         f"--header={header}",
     ]
